@@ -5,6 +5,8 @@ All notable changes to this project are documented here. This project follows
 
 ## [Unreleased]
 
+## [0.0.1] - 2026-10-16
+
 ### Added
 
 - `Profile` and `Pipeline` public API
@@ -13,3 +15,6 @@ All notable changes to this project are documented here. This project follows
 - `observations.jsonl` output (`framelift/observation/v1`)
 - `framelift run` and `framelift synth` CLI commands
 - Synthetic fictional-shop sample generator
+
+[Unreleased]: https://github.com/rysk-tanaka/framelift/compare/v0.0.1...HEAD
+[0.0.1]: https://github.com/rysk-tanaka/framelift/releases/tag/v0.0.1
