@@ -110,13 +110,13 @@ Pipeline.run(inputs)
   - `lint` — ruff check、ruff format --check、ty check
   - `test` — Python 3.12・3.13・3.14 のマトリクスで pytest
   - `build` — wheel をビルドし、クリーンな環境にインストールして CLI を実行
-- `release.yml` — `v*` タグの push で実行。タグと `pyproject.toml` のバージョンの一致を確認し、テスト・ビルドの後、Trusted Publishing で PyPI に公開する。`id-token: write` は publish ジョブだけに付ける。GitHub の `pypi` environment を使う
+- `release.yml` — main の `pyproject.toml` が変わったときに実行。共通ワークフロー（`rysk-tanaka/workflows` の `release-on-version-change.yml`）で版が変わっていれば `v<version>` のタグと GitHub Release を作り、テスト・ビルドの後、Trusted Publishing で PyPI に公開する。`GITHUB_TOKEN` で作ったタグは別のワークフローを起動しないので、タグ作成と公開は同じファイルに置く。`id-token: write` は publish ジョブだけに付ける。GitHub の `pypi` environment を使う。公開に失敗したときは `workflow_dispatch` で再実行する
 
 リリース手順。
 
 1. `pyproject.toml` の `version` を上げる（`uv version --bump minor` など）
 2. `CHANGELOG.md` の Unreleased を新しい版の見出しに移す
-3. コミットして `v<version>` のタグを push する
+3. コミットして main に入れる（タグは `release.yml` が作る）
 
 ## 依存関係の自動更新
 

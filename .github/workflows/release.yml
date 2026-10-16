@@ -6,29 +6,60 @@
 #        workflow: release.yml, environment: pypi
 #   2. GitHub → Settings → Environments → create "pypi" (optionally add yourself as a required reviewer)
 #
-# Release: bump `version` in pyproject.toml, update CHANGELOG.md, then push a tag `v<version>`.
+# Release: bump `version` in pyproject.toml, update CHANGELOG.md, then merge to main. The tag
+# `v<version>` and the GitHub Release are created here, followed by the PyPI upload.
+#
+# Tag creation and publishing live in one workflow on purpose: a tag pushed with GITHUB_TOKEN
+# does not trigger other workflows, and PyPI trusts this file by name.
+#
+# Rerun with workflow_dispatch when the tag already exists but publishing failed.
 name: release
 
 on:
   push:
-    tags: ["v*"]
+    branches: [main]
+    paths: ["pyproject.toml"]
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
 
 jobs:
+  validate-branch:
+    runs-on: ubuntu-latest
+    steps:
+      # push is already filtered to main; this guards workflow_dispatch from other branches
+      - name: Validate branch
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::This workflow can only be run from the main branch (current: ${GITHUB_REF})"
+          exit 1
+
+  create-release:
+    needs: validate-branch
+    permissions:
+      contents: write
+    uses: rysk-tanaka/workflows/.github/workflows/release-on-version-change.yml@d7782d948c15ff4a2d2e452b86e8265c1eb98a94 # main
+    with:
+      version_source: pyproject_toml
+      tag_prefix: v
+      force_released_output: ${{ github.event_name == 'workflow_dispatch' }}
+    secrets: inherit
+
   build:
+    needs: create-release
+    if: needs.create-release.outputs.released == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.create-release.outputs.tag }}
+          persist-credentials: false
       - uses: astral-sh/setup-uv@v10.3.0
-      - name: Check that the tag matches the package version
-        run: |
-          version="$(uv version --short)"
-          if [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
-            echo "Tag ${GITHUB_REF_NAME} does not match pyproject version ${version}" >&2
-            exit 1
-          fi
       - run: uv sync --locked --all-extras
       - run: uv run pytest
       - run: uv build
@@ -52,3 +83,6 @@ jobs:
           name: dist
           path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # a workflow_dispatch rerun may find this version already on PyPI
+          skip-existing: true
