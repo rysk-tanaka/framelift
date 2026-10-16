@@ -45,23 +45,24 @@ def _glob(pattern: str) -> list[Path]:
 def expand_inputs(inputs: Iterable[str | Path]) -> list[Path]:
     """Expand files, directories and glob patterns into a de-duplicated list of image paths.
 
-    Directories contribute their image files (non-recursive, sorted). Raises `FileNotFoundError`
-    when an input matches nothing, so typos are not silently ignored.
+    A path that exists is used as is, even if it contains glob characters. Directories contribute
+    their image files (non-recursive, sorted). Raises `FileNotFoundError` when an input matches
+    nothing, so typos are not silently ignored.
     """
     seen: set[Path] = set()
     result: list[Path] = []
     for item in inputs:
         text = str(item)
-        if any(c in text for c in _GLOB_CHARS):
+        path = Path(text)
+        # An existing path is taken literally, so names like "shot[1].png" are not globs.
+        if path.is_dir():
+            candidates = sorted(p for p in path.iterdir() if _is_image(p))
+        elif path.is_file():
+            candidates = [path]
+        elif any(c in text for c in _GLOB_CHARS):
             candidates = [p for p in _glob(text) if _is_image(p)]
         else:
-            path = Path(text)
-            if path.is_dir():
-                candidates = sorted(p for p in path.iterdir() if _is_image(p))
-            elif path.is_file():
-                candidates = [path]
-            else:
-                candidates = []
+            candidates = []
         if not candidates:
             raise FileNotFoundError(f"No image matched input: {text}")
         for candidate in candidates:
@@ -72,18 +73,39 @@ def expand_inputs(inputs: Iterable[str | Path]) -> list[Path]:
     return result
 
 
+def _decode(path: Path, data: bytes) -> tuple[Image.Image, str]:
+    # Every decoding failure becomes a ValueError, so callers report it per image (a truncated
+    # PNG raises OSError, an oversized one DecompressionBombError) instead of stopping a run.
+    try:
+        image = Image.open(io.BytesIO(data))
+    except (UnidentifiedImageError, Image.DecompressionBombError, OSError) as exc:
+        raise ValueError(f"Not a readable image: {path} ({exc})") from exc
+    try:
+        image.load()
+    except (Image.DecompressionBombError, OSError) as exc:
+        image.close()
+        raise ValueError(f"Not a readable image: {path} ({exc})") from exc
+    media_type = _MEDIA_TYPES.get(image.format or "")
+    if media_type is None:
+        image.close()
+        raise ValueError(f"Unsupported image format for {path}")
+    return image, media_type
+
+
+def check_image(path: Path) -> str:
+    """Verify that an image decodes and is supported; return its SHA-256 (no perceptual hash)."""
+    data = path.read_bytes()
+    image, _ = _decode(path, data)
+    image.close()
+    return hashlib.sha256(data).hexdigest()
+
+
 def load_image(path: Path) -> ImageSource:
     """Read an image, verify it decodes, and compute its SHA-256 and perceptual hash."""
     data = path.read_bytes()
-    try:
-        with Image.open(io.BytesIO(data)) as image:
-            image.load()
-            media_type = _MEDIA_TYPES.get(image.format or "")
-            phash = str(imagehash.phash(image))
-    except UnidentifiedImageError as exc:
-        raise ValueError(f"Not a readable image: {path}") from exc
-    if media_type is None:
-        raise ValueError(f"Unsupported image format for {path}")
+    image, media_type = _decode(path, data)
+    with image:
+        phash = str(imagehash.phash(image))
     return ImageSource(
         path=path,
         data=data,

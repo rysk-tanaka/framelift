@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from PIL import Image
 
 from framelift._internal import synth
+from framelift._internal.dataset import load_dataset
 
 
 def test_generate_is_deterministic(tmp_path: Path) -> None:
@@ -15,13 +15,14 @@ def test_generate_is_deterministic(tmp_path: Path) -> None:
     assert (tmp_path / "a" / a[0].file).read_bytes() == (tmp_path / "b" / b[0].file).read_bytes()
 
 
-def test_truth_file_matches_images(tmp_path: Path) -> None:
+def test_dataset_file_matches_images(tmp_path: Path) -> None:
     truths = synth.generate(tmp_path, n=4, seed=1)
-    lines = (tmp_path / "truth.jsonl").read_text().splitlines()
-    assert [json.loads(line)["file"] for line in lines] == [t.file for t in truths]
-    for truth in truths:
+    dataset, _ = load_dataset(tmp_path / synth.DATASET_FILE)  # also checks every sha256
+    assert [case.image for case in dataset.cases] == [t.file for t in truths]
+    for truth, case in zip(truths, dataset.cases, strict=True):
         with Image.open(tmp_path / truth.file) as image:
             assert image.size == synth._SIZES[truth.orientation]
+            assert (case.metadata["width"], case.metadata["height"]) == image.size
 
 
 def test_items_fit_on_screen(tmp_path: Path) -> None:

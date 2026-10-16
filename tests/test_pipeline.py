@@ -4,6 +4,7 @@ import hashlib
 from dataclasses import asdict
 from pathlib import Path
 
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic_ai.messages import (
     BinaryContent,
     ModelMessage,
@@ -14,7 +15,7 @@ from pydantic_ai.messages import (
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from examples.fantasy_shop import profile as shop_profile
-from framelift import Observation, Pipeline
+from framelift import Observation, Pipeline, Profile
 
 
 def _image_sha(messages: list[ModelMessage]) -> str:
@@ -98,6 +99,9 @@ def test_exhausted_retries_are_recorded_as_errors(samples) -> None:
 
     assert len(result.failed) == len(truths)
     assert all(o.data is None and o.error for o in result.failed)
+    # The failed attempts still cost tokens, which evaluation compares.
+    assert all(o.retries == 1 and o.usage.requests == 2 for o in result.failed)
+    assert all(o.usage.input_tokens > 0 for o in result.failed)
 
 
 def test_anonymized_paths(samples) -> None:
@@ -113,3 +117,21 @@ def test_anonymized_paths(samples) -> None:
         root
     )
     assert all(o.source.path is None for o in result.observations)
+
+
+class Aliased(BaseModel):
+    model_config = ConfigDict(serialize_by_alias=True)
+
+    shop_name: str = Field(alias="shopName")
+
+
+def test_observations_keep_the_models_own_serialization(samples) -> None:
+    root, truths = samples
+    profile = Profile(name="p", output_type=Aliased, instructions="read")
+
+    def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        return ModelResponse(parts=[ToolCallPart(info.output_tools[0].name, {"shopName": "A"})])
+
+    result = Pipeline(profile, model=FunctionModel(respond)).run(root / truths[0].file)
+
+    assert result.observations[0].data == {"shopName": "A"}

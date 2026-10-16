@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Hashable, Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
 from pydantic import BaseModel
+
+from framelift._internal.fields import item_model_of
 
 type Validator[OutputT: BaseModel] = Callable[[OutputT], OutputT | None]
 """A check run on every extracted output.
@@ -15,6 +18,28 @@ type Validator[OutputT: BaseModel] = Callable[[OutputT], OutputT | None]
 Raise `pydantic_ai.ModelRetry` with a message to make the model try again; return a (possibly
 modified) output, or `None` to keep it as is.
 """
+
+
+def item_field(output_type: type[BaseModel]) -> tuple[str, type[BaseModel]]:
+    """Find the one top-level ``list[SomeModel]`` field that `Profile.item_key` applies to.
+
+    ``list[SomeModel] | None`` counts too; ``None`` is read as an empty list.
+
+    Returns the field name and the item model. Raises `ValueError` unless exactly one such field
+    exists, because the key alone cannot tell which list it is meant for.
+    """
+    candidates: list[tuple[str, type[BaseModel]]] = []
+    for name, info in output_type.model_fields.items():
+        item_model = item_model_of(info.annotation)
+        if item_model is not None:
+            candidates.append((name, item_model))
+    if len(candidates) != 1:
+        found = ", ".join(name for name, _ in candidates) or "none"
+        raise ValueError(
+            "Profile.item_key needs exactly one top-level list-of-models field in "
+            f"{output_type.__name__} (found: {found})"
+        )
+    return candidates[0]
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -28,6 +53,9 @@ class Profile[OutputT: BaseModel]:
         version: Bump this whenever the instructions or the output model change, so that
             observations, caches and evaluation results can be told apart.
         validators: Extra checks run on every output; see `Validator`.
+        item_key: Returns the identity of one list item, e.g. ``lambda item: item.name``. It is
+            applied to the items of the output's only ``list[SomeModel]`` field, and is used to
+            match extracted items with the expected ones during evaluation.
     """
 
     name: str
@@ -35,6 +63,7 @@ class Profile[OutputT: BaseModel]:
     instructions: str
     version: str = "1"
     validators: Sequence[Validator[OutputT]] = field(default_factory=tuple)
+    item_key: Callable[[Any], Hashable] | None = None
 
     def __post_init__(self) -> None:
         if not self.name.strip():
@@ -44,6 +73,8 @@ class Profile[OutputT: BaseModel]:
         if not (isinstance(self.output_type, type) and issubclass(self.output_type, BaseModel)):
             raise TypeError("Profile.output_type must be a pydantic BaseModel subclass")
         object.__setattr__(self, "validators", tuple(self.validators))
+        if self.item_key is not None:
+            item_field(self.output_type)
 
     @property
     def fingerprint(self) -> str:

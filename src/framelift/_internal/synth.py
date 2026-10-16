@@ -6,12 +6,15 @@ used as a public benchmark without any real game or app content.
 
 from __future__ import annotations
 
-import json
+import hashlib
+import io
 import random
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Literal
 
 from PIL import Image, ImageDraw, ImageFont
+
+from framelift._internal.dataset import DatasetCase, write_dataset
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -79,19 +82,36 @@ def render(truth: SampleTruth) -> Image.Image:
     return image
 
 
+DATASET_FILE = "dataset.yaml"
+
+
+def _to_case(truth: SampleTruth, data: bytes) -> DatasetCase:
+    width, height = _SIZES[truth.orientation]
+    return DatasetCase(
+        name=truth.file.removesuffix(".png"),
+        image=truth.file,
+        sha256=hashlib.sha256(data).hexdigest(),
+        expected={"shop_name": truth.shop_name, "items": [asdict(i) for i in truth.items]},
+        metadata={"orientation": truth.orientation, "width": width, "height": height},
+    )
+
+
 def generate(out_dir: Path, *, n: int, seed: int = 0) -> list[SampleTruth]:
-    """Write ``n`` PNG screenshots and a ``truth.jsonl`` with their ground truth."""
+    """Write ``n`` PNG screenshots and a ``dataset.yaml`` with their ground truth."""
     if n < 1:
         raise ValueError("n must be >= 1")
     out_dir.mkdir(parents=True, exist_ok=True)
     rng = random.Random(seed)
     truths: list[SampleTruth] = []
+    cases: list[DatasetCase] = []
     for index in range(n):
         orientation: Orientation = "portrait" if index % 2 == 0 else "landscape"
         truth = _random_truth(rng, f"shop-{index:03d}.png", orientation)
-        render(truth).save(out_dir / truth.file, format="PNG")
+        buffer = io.BytesIO()
+        render(truth).save(buffer, format="PNG")
+        data = buffer.getvalue()
+        (out_dir / truth.file).write_bytes(data)
         truths.append(truth)
-    with (out_dir / "truth.jsonl").open("w", encoding="utf-8") as fh:
-        for truth in truths:
-            fh.write(json.dumps(asdict(truth), ensure_ascii=False) + "\n")
+        cases.append(_to_case(truth, data))
+    write_dataset(out_dir / DATASET_FILE, cases)
     return truths

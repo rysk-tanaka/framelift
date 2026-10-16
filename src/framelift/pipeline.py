@@ -2,24 +2,21 @@
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
-from pydantic_ai.exceptions import UnexpectedModelBehavior
 
-from framelift._internal.extract import Extractor, model_label
+from framelift._internal.extract import Extractor
 from framelift._internal.sources import expand_inputs, load_image
-from framelift.observation import Observation, ProfileRef, SourceRef, Usage
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
     from pydantic_ai.models import Model
 
-    from framelift._internal.sources import ImageSource
+    from framelift.observation import Observation
     from framelift.profile import Profile
 
 OBSERVATIONS_FILE = "observations.jsonl"
@@ -80,7 +77,9 @@ class Pipeline[OutputT: BaseModel]:
             writer = result.output_path.open("w", encoding="utf-8")
         try:
             for path in paths:
-                observation = self._observe(load_image(path))
+                observation, _ = self._extractor.observe(
+                    load_image(path), anonymize_paths=self.anonymize_paths
+                )
                 result.observations.append(observation)
                 if writer is not None:
                     writer.write(observation.to_json() + "\n")
@@ -89,40 +88,3 @@ class Pipeline[OutputT: BaseModel]:
             if writer is not None:
                 writer.close()
         return result
-
-    def _observe(self, image: ImageSource) -> Observation:
-        profile = ProfileRef(name=self.profile.name, version=self.profile.version)
-        source = SourceRef(
-            path=None if self.anonymize_paths else image.path.as_posix(),
-            sha256=image.sha256,
-            phash=image.phash,
-        )
-        model = model_label(self.model)
-        started = time.perf_counter()
-        try:
-            extraction = self._extractor.extract(image)
-        except UnexpectedModelBehavior as exc:
-            return Observation(
-                status="error",
-                profile=profile,
-                source=source,
-                data=None,
-                error=str(exc),
-                model=model,
-                usage=Usage(latency_ms=round((time.perf_counter() - started) * 1000)),
-                retries=0,
-            )
-        return Observation(
-            status="ok",
-            profile=profile,
-            source=source,
-            data=extraction.output.model_dump(mode="json"),
-            model=model,
-            usage=Usage(
-                input_tokens=extraction.input_tokens,
-                output_tokens=extraction.output_tokens,
-                requests=extraction.requests,
-                latency_ms=extraction.latency_ms,
-            ),
-            retries=extraction.retries,
-        )

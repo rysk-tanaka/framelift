@@ -5,6 +5,20 @@ All notable changes to this project are documented here. This project follows
 
 ## [Unreleased]
 
+### Added
+
+- Evaluation harness on `pydantic-evals` (`framelift[eval]`): `framelift eval` scores a profile and
+  a model against a `framelift/dataset/v1` dataset (validation pass rate, field accuracy, list-item
+  precision and recall, tokens, latency, retries)
+- `Profile.item_key` to match list items with the expected ones
+- `--root` option to keep dataset images outside the repository
+
+### Changed
+
+- Breaking: `framelift synth` writes `dataset.yaml` (`framelift/dataset/v1`) instead of
+  `truth.jsonl`
+- PyYAML is now a dependency
+
 ## [0.0.1] - 2026-10-16
 
 ### Added

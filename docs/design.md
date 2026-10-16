@@ -8,19 +8,22 @@ framelift は、画面収録やスクリーンショットから、利用者が�
 
 ## 使い方のイメージ
 
-1.0 時点の完成形のイメージ。0.0.1 で使えるのは `name`・`version`・`output_type`・`instructions`・`validators` と画像入力だけで、それ以外の引数はコメントの版で足す。
+1.0 時点の完成形のイメージ。0.1 で使えるのは `name`・`version`・`output_type`・`instructions`・`validators`・`item_key` と画像入力だけで、それ以外の引数はコメントの版で足す。
 
 ```python
 from pydantic import BaseModel, Field
 from framelift import Profile, Pipeline
 
+
 class ShopItem(BaseModel):
     name: str = Field(description="商品名")
     price: int = Field(description="価格（整数）", gt=0)
 
+
 class ShopScreen(BaseModel):
     shop_name: str
     items: list[ShopItem]
+
 
 shop = Profile(
     name="fantasy-shop",
@@ -28,13 +31,13 @@ shop = Profile(
     output_type=ShopScreen,
     instructions="ショップ画面の商品一覧を、表示どおりに読み取ってください。",
     screen_description="ショップの商品一覧画面",  # 0.3
-    item_key=lambda item: item.name,              # 0.2
-    locate="model",                               # 0.3。full | fixed | model
-    redact=[(0.0, 0.85, 1.0, 1.0)],               # 0.3。送信前に塗りつぶす領域（相対座標）
+    item_key=lambda item: item.name,
+    locate="model",  # 0.3。full | fixed | model
+    redact=[(0.0, 0.85, 1.0, 1.0)],  # 0.3。送信前に塗りつぶす領域（相対座標）
 )
 
 pipeline = Pipeline(shop, model="anthropic:<model>", out_dir="out/")
-pipeline.run(["recording.mp4", "shots/*.png"])   # 動画入力は 0.2
+pipeline.run(["recording.mp4", "shots/*.png"])  # 動画入力は 0.2
 # → out/observations.jsonl（フレーム単位）と out/items.jsonl（集約後、0.2）
 ```
 
@@ -54,7 +57,7 @@ framelift run recording.mp4 --profile myprofiles:shop --model anthropic:<model> 
 | `instructions` | 読み方の指示 | 0.0.1 |
 | `validators` | 出力を検査し、問題があれば `ModelRetry` を投げる関数。Pydantic AI の出力検証に登録し、再試行させる | 0.0.1 |
 | `version` | 指示やモデル定義を変えたら上げる。キャッシュと評価結果の識別に使う | 0.0.1 |
-| `item_key` | 一覧の各項目を同一視するキー。複数フレームの集約に使う | 0.2 |
+| `item_key` | 一覧の各項目を同一視するキー。評価で正解の項目と対応付けるのと、複数フレームの集約（0.2）に使う。`output_type` のトップレベルにある、ただ 1 つの `list[モデル]`（`| None` も可）型のフィールドの要素に適用する | 0.1 |
 | `screen_description` | 対象画面の説明（画面判定に使う） | 0.3 |
 | `locate` / `redact` | 切り出し方と、送信前に塗りつぶす領域 | 0.3 |
 
@@ -88,7 +91,7 @@ graph LR
 
 `screen_description` をもとに、縮小した画像で「対象画面かどうか（bool）と確信度」を軽いモデルに返させる。判定結果は pHash をキーにキャッシュする。テンプレート照合など、LLM を使わない判定関数に置き換えることもできる。
 
-#### 切り出しとマスク
+#### 切り出しと塗りつぶし
 
 外部に送る前に、対象のパネルだけを切り出し、`redact` で指定した領域を塗りつぶす。
 
@@ -140,21 +143,45 @@ Pydantic AI の `Agent` に、`output_type` と切り出した画像（`BinaryCo
 
 ### 評価ハーネス
 
-`pydantic-evals` の上に、画像と正解のデータセット形式、評価器、設定の総当たり比較を用意する（`framelift[eval]`）。
+`pydantic-evals` の上に、画像と正解のデータセット形式、評価器、設定の総当たり比較を用意する（`framelift[eval]`）。データセット形式と評価器は 0.1 で実装済み。
 
-- データセット — YAML で書く。各ケースは、画像（データセットのルートからの相対パス）、sha256、正解（一部のフィールドだけの指定も可）、メタデータ（画面の向き・端末・解像度など）を持つ。ルートは引数か環境変数で渡すので、画像をリポジトリに置かない運用ができる。実行前に sha256 を照合する
-- 評価器 — フィールドの一致率、一覧項目の適合率と再現率（`item_key` で正解と対応付け）、検証の通過率、コストと処理時間
-- 総当たり比較 — `matrix.yaml` で「モデル×切り出し戦略×指示の版」を総当たりで実行し、比較表を Markdown で出力する。README にそのまま貼れる形にする
+- データセット — YAML で書く。各ケースは、画像（データセットのルートからの相対パス）、sha256、正解（必須フィールドはすべて書く。既定値のあるフィールドは省いてよい）、メタデータ（画面の向き・端末・解像度など）を持つ。画像のパスはデータセットファイルのディレクトリからの相対で、`--root` で別のディレクトリを指せるので、画像をリポジトリに置かない運用ができる。あるデータセット用に設定したルートが別のデータセットにも気づかれないまま効いてしまうので、環境変数は使わない。実行前に全画像を読み込み、画像として読めることと sha256（大文字・小文字は区別しない）を照合し、問題はまとめて報告する
+- 評価器 — 下の表のとおり。結果は pydantic-evals のレポートとして端末に出す
+- 総当たり比較（0.3） — `matrix.yaml` で「モデル×切り出し戦略×指示の版」を総当たりで実行し、比較表を Markdown で出力する。README にそのまま貼れる形にする
+
+```yaml
+schema: framelift/dataset/v1
+cases:
+  - name: shop-000
+    image: shop-000.png
+    sha256: 3dbb5bc8...
+    expected:
+      shop_name: Amber Market
+      items:
+        - {name: Dew Rope, price: 1590}
+    metadata: {orientation: portrait, width: 720, height: 1280}
+```
+
+| 評価器 | 内容 |
+| --- | --- |
+| `ValidationPassed` | 再試行の上限までに検証を通ったか（検証の通過率） |
+| `FieldAccuracy` | 正解に書いたフィールドだけを葉の値で比べた一致率。一覧は `item_key` で対応付けた項目どうしを比べ（同じキーの項目は出現順に対応付ける）、出力にない項目の値は不一致と数える。`item_key` がないとき、または正解が空の一覧のときは、一覧全体を 1 つの値とし、位置ごとに正解に書いたフィールドを比べる。不一致のパスを理由に残す |
+| `item_precision` / `item_recall` | 一覧項目の適合率と再現率（`item_key` で正解と対応付け）。`item_key` があり、正解に一覧があるときだけ出す |
+| `input_tokens` / `output_tokens` / `latency_ms` / `retries` | コストと処理時間。コストはトークン量で比べ、金額には換算しない |
+
+正解は実行前に `output_type` 全体で（バリデータ・シリアライザ・設定も含めて）検証し、出力と同じ JSON 形式に揃える。必須フィールドはすべて書き、既定値のあるフィールドだけ省いてよく、省いたフィールドは比べない。出力に含まれない `Field(exclude=True)` のトップレベルのフィールドは、検証には使うが比べない。必須フィールドを省けないのは、一部だけの正解には出力モデルのバリデータや設定を正しく適用できず、出力側と値やキーが食い違うため。足りない必須フィールド、型の合わない値（引用符のない YAML の `no` が `False` になる場合など）、モデルバリデータが拒否する値、出力に現れないキー（誤記・未知のフィールド・入れ子の除外フィールド。Union や `extra="allow"` のモデルも、検証後の出力を書き出した形で判定する）、`item_key` が例外を出す項目は、データセットのエラーとして実行前にまとめて報告する。抽出した項目で `item_key` が例外を出した場合は、評価を止めず、どの正解とも対応しない項目として数える。一覧のシリアライザが並べ替えてもキーと値がずれないよう、一覧の項目はキーも値もそれぞれの項目のモデルから取る。Python では `False == 0` が成り立つので、値の比較では真偽値と数値を別の値として扱う。実行中は、抽出の直前に読んだ画像の sha256 をもう一度照合し、照合後に差し替わった画像はそのケースの失敗にする。
+
+検証を通らなかったケースは、`FieldAccuracy` と適合率・再現率を 0 とする。抽出は pydantic-evals のイベントループ上で非同期に実行し、コストとプロバイダのレート制限を読みやすくするため、ケースは 1 件ずつ順に処理する。失敗の多いモデルが安く見えないよう、検証を通らなかったケースも使ったトークン量と再試行回数を記録する。`framelift eval` は、ケースや評価器が異常終了したときだけ終了コード 1 で終わり、スコアが低いだけなら 0 で終わる。
 
 ### 合成サンプル
 
-架空のショップ画面を Pillow で描画し、画像・動画・正解を自動で生成する（`framelift synth`）。架空の店名・商品名・価格で一覧 UI を描き、画面の向き、スクロール、JPEG 圧縮、ノイズ、解像度を変えられる。
+架空のショップ画面を Pillow で描画し、画像・動画・正解を自動で生成する（`framelift synth`）。正解は評価にそのまま使える `dataset.yaml` として書き出す。架空の店名・商品名・価格で一覧 UI を描き、画面の向き、スクロール、JPEG 圧縮、ノイズ、解像度を変えられる。
 
 正解が自動で得られるので、公開できる評価データセットとして使える。README には合成データでのベンチマークを載せ、実際の画面での結果は「非公開のデータセットでの集計」として補足する。テスト用の合成動画（スクロールするショップ画面）も同じ生成器で作る。リポジトリに置くサンプル画像は少数（`samples/`）に限り、それ以外は生成スクリプトで再現する。
 
 ### プライバシー
 
-処理はローカルで行い、外部に送るのは切り出しとマスクを済ませた画像だけ。既定の送信ポリシーも「切り出し後の画像のみ」にする（画面にはチャットや他のプレイヤー名など、無関係な個人情報が映るため）。切り出しを入れる 0.3 までは、利用者が渡した画像をそのまま送る。テレメトリは持たない。Logfire は任意の依存で、既定では無効。キャッシュと出力はローカルのディレクトリにだけ書く。
+処理はローカルで行い、外部に送るのは切り出しと塗りつぶしを済ませた画像だけ。既定の送信ポリシーも「切り出し後の画像のみ」にする（画面にはチャットや他のプレイヤー名など、無関係な個人情報が映るため）。切り出しを入れる 0.3 までは、利用者が渡した画像をそのまま送る。テレメトリは持たない。Logfire は任意の依存で、既定では無効。キャッシュと出力はローカルのディレクトリにだけ書く。
 
 ### テスト
 
@@ -171,7 +198,7 @@ Typer で実装する。
 | --- | --- | --- |
 | `framelift run <inputs...> --profile pkg.module:obj --model ... --out DIR` | 抽出 | 0.0.1 |
 | `framelift synth --out DIR --n 100` | 合成サンプルの生成 | 0.0.1 |
-| `framelift eval <dataset.yaml> --profile ... [--matrix matrix.yaml]` | 評価（`--matrix` は 0.3） | 0.1 |
+| `framelift eval <dataset.yaml> --profile ... --model ... [--root DIR] [--matrix matrix.yaml]` | 評価（`--matrix` は 0.3） | 0.1 |
 | `framelift frames <video> --out DIR` | フレーム抽出と重複除去の結果だけを確認する（デバッグ用） | 0.2 |
 
 ### パッケージングとリリース
@@ -179,7 +206,7 @@ Typer で実装する。
 - ライセンスは MIT
 - uv・ruff・ty、`py.typed` 付き。対応 Python は 3.12 以上
 - 型チェックは ty（Astral）。Pydantic のモデル（`Field`・`ConfigDict` など）を解釈できる。まだベータの 0.x 系で、リリース間で診断が変わりうるため、バージョンを固定し、Renovate の更新 PR で差分を確認してから上げる。設定は `pyproject.toml` の `[tool.ty]` に置く
-- 主な依存は pydantic、pydantic-ai-slim、Pillow、imagehash、Typer。extras は `video`（PyAV）、`eval`（pydantic-evals）、`anthropic` / `openai` / `google`（各プロバイダ）
+- 主な依存は pydantic、pydantic-ai-slim、Pillow、imagehash、PyYAML、Typer。extras は `video`（PyAV）、`eval`（pydantic-evals）、`anthropic` / `openai` / `google`（各プロバイダ）
 - CI は対応 Python のマトリクスで ruff・ty・pytest を実行し、wheel をクリーンな環境に入れて CLI を動かす
 - main の `pyproject.toml` の版が変わると、`release.yml` がタグと GitHub Release を作り、GitHub Actions から Trusted Publishing で PyPI に公開する（秘密情報を持たない）
 - 0.x 系で、破壊的変更を許す。CHANGELOG は Conventional Commits をもとに書き、依存は Renovate で追随する
@@ -190,9 +217,9 @@ Typer で実装する。
 | 版 | 内容 |
 | --- | --- |
 | 0.0.1 | 画像入力、構造化抽出（検証・再試行）、`observations.jsonl`、合成サンプル（静止画）、CLI の `run`・`synth`（実装済み） |
-| 0.1 | 評価ハーネス（データセット形式、項目単位の評価器、`framelift eval`） |
+| 0.1 | 評価ハーネス（データセット形式、項目単位の評価器、`framelift eval`）、`Profile.item_key`、synth の `dataset.yaml`（実装済み） |
 | 0.2 | 動画入力、フレーム抽出と重複除去、集約と `items.jsonl`、合成動画 |
-| 0.3 | 画面判定、切り出し（`model` / `fixed`）とマスク、キャッシュ、総当たり比較 |
+| 0.3 | 画面判定、切り出し（`model` / `fixed`）と塗りつぶし、キャッシュ、総当たり比較 |
 | 1.0 | 最初の利用者での運用を経て、公開 API を確定 |
 
 ## 決定事項

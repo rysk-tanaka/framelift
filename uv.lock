@@ -406,6 +406,7 @@ dependencies = [
     { name = "pillow" },
     { name = "pydantic" },
     { name = "pydantic-ai-slim" },
+    { name = "pyyaml" },
     { name = "typer" },
 ]
 
@@ -444,6 +445,7 @@ requires-dist = [
     { name = "pydantic-ai-slim", extras = ["google"], marker = "extra == 'google'", specifier = ">=2.57" },
     { name = "pydantic-ai-slim", extras = ["openai"], marker = "extra == 'openai'", specifier = ">=2.57" },
     { name = "pydantic-evals", marker = "extra == 'eval'", specifier = ">=2.57" },
+    { name = "pyyaml", specifier = ">=6" },
     { name = "typer", specifier = ">=0.27" },
 ]
 provides-extras = ["video", "eval", "anthropic", "openai", "google"]

@@ -4,6 +4,8 @@ Usage:
     framelift synth --out samples --n 3
     framelift run "samples/*.png" --profile examples.fantasy_shop:profile \
         --model anthropic:<model-name> --out out
+    framelift eval samples/dataset.yaml --profile examples.fantasy_shop:profile \
+        --model anthropic:<model-name>
 """
 
 from pydantic import BaseModel, Field
@@ -39,4 +41,5 @@ profile = Profile(
         "keeping names exactly as displayed."
     ),
     validators=[items_are_unique],
+    item_key=lambda item: item.name,
 )
