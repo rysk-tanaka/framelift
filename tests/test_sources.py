@@ -17,7 +17,7 @@ def test_expand_directory_glob_and_file_without_duplicates(samples: tuple[Path, 
 
 def test_expand_ignores_non_images_in_directories(samples: tuple[Path, list]) -> None:
     root, truths = samples
-    assert (root / "truth.jsonl").exists()
+    assert (root / "dataset.yaml").exists()
     assert len(expand_inputs([root])) == len(truths)
 
 
@@ -42,3 +42,10 @@ def test_load_image_rejects_non_images(tmp_path: Path) -> None:
     fake.write_text("not an image")
     with pytest.raises(ValueError, match="Not a readable image"):
         load_image(fake)
+
+
+def test_existing_paths_with_glob_characters_are_taken_literally(samples) -> None:
+    root, truths = samples
+    literal = root / "shop[0].png"
+    (root / truths[0].file).rename(literal)
+    assert expand_inputs([literal]) == [literal]
