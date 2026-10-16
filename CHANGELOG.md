@@ -5,6 +5,8 @@ All notable changes to this project are documented here. This project follows
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-16
+
 ### Added
 
 - Evaluation harness on `pydantic-evals` (`framelift[eval]`): `framelift eval` scores a profile and
@@ -30,5 +32,6 @@ All notable changes to this project are documented here. This project follows
 - `framelift run` and `framelift synth` CLI commands
 - Synthetic fictional-shop sample generator
 
-[Unreleased]: https://github.com/rysk-tanaka/framelift/compare/v0.0.1...HEAD
+[Unreleased]: https://github.com/rysk-tanaka/framelift/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/rysk-tanaka/framelift/compare/v0.0.1...v0.1.0
 [0.0.1]: https://github.com/rysk-tanaka/framelift/releases/tag/v0.0.1

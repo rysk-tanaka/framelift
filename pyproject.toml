@@ -1,6 +1,6 @@
 [project]
 name = "framelift"
-version = "0.0.1"
+version = "0.1.0"
 description = "Extract structured data from screen recordings and screenshots with vision LLMs."
 readme = "README.md"
 license = "MIT"
