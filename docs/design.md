@@ -8,7 +8,7 @@ framelift は、画面収録やスクリーンショットから、利用者が�
 
 ## 使い方のイメージ
 
-1.0 時点の完成形のイメージ。0.1 で使えるのは `name`・`version`・`output_type`・`instructions`・`validators`・`item_key` と画像入力だけで、それ以外の引数はコメントの版で足す。
+1.0 時点の完成形のイメージ。0.2 で使えるのは `name`・`version`・`output_type`・`instructions`・`validators`・`item_key` と、画像・動画の入力までで、それ以外の引数はコメントの版で足す。
 
 ```python
 from pydantic import BaseModel, Field
@@ -37,8 +37,8 @@ shop = Profile(
 )
 
 pipeline = Pipeline(shop, model="anthropic:<model>", out_dir="out/")
-pipeline.run(["recording.mp4", "shots/*.png"])  # 動画入力は 0.2
-# → out/observations.jsonl（フレーム単位）と out/items.jsonl（集約後、0.2）
+pipeline.run(["recording.mp4", "shots/*.png"])
+# → out/observations.jsonl（フレーム単位）と out/items.jsonl（集約後）
 ```
 
 ```bash
@@ -57,7 +57,7 @@ framelift run recording.mp4 --profile myprofiles:shop --model anthropic:<model> 
 | `instructions` | 読み方の指示 | 0.0.1 |
 | `validators` | 出力を検査し、問題があれば `ModelRetry` を投げる関数。Pydantic AI の出力検証に登録し、再試行させる | 0.0.1 |
 | `version` | 指示やモデル定義を変えたら上げる。キャッシュと評価結果の識別に使う | 0.0.1 |
-| `item_key` | 一覧の各項目を同一視するキー。評価で正解の項目と対応付けるのと、複数フレームの集約（0.2）に使う。`output_type` のトップレベルにある、ただ 1 つの `list[モデル]`（`| None` も可）型のフィールドの要素に適用する | 0.1 |
+| `item_key` | 一覧の各項目を同一視するキー。評価で正解の項目と対応付けるのと、複数フレームの集約に使う。`output_type` のトップレベルにある、ただ 1 つの `list[モデル]`（`| None` も可）型のフィールドの要素に適用する | 0.1 |
 | `screen_description` | 対象画面の説明（画面判定に使う） | 0.3 |
 | `locate` / `redact` | 切り出し方と、送信前に塗りつぶす領域 | 0.3 |
 
@@ -68,7 +68,7 @@ framelift run recording.mp4 --profile myprofiles:shop --model anthropic:<model> 
 ```mermaid
 graph LR
     S[Source<br/>画像・動画] --> SM[Sampler<br/>一定間隔で抽出]
-    SM --> DD[Deduper<br/>pHashで区切り<br/>最も鮮明な1枚]
+    SM --> DD[Deduper<br/>静止区間で区切り<br/>最も鮮明な1枚]
     DD --> CL[Classifier<br/>対象画面か]
     CL --> LO[Locator<br/>切り出し・マスク]
     LO --> EX[Extractor<br/>構造化抽出・再試行]
@@ -77,15 +77,26 @@ graph LR
     AG --> IT[(items.jsonl)]
 ```
 
-0.0.1 で実装済みなのは Source（画像のみ）と Extractor、`observations.jsonl` の書き出し。
+0.2 で実装済みなのは Source（画像・動画）、Sampler、Deduper、Extractor、Aggregator と、`observations.jsonl`・`items.jsonl` の書き出し。
 
 #### 入力
 
-画像ファイル群と動画ファイルを受け付ける。動画は PyAV でデコードする。PyAV は wheel に FFmpeg が同梱されているので、利用者に FFmpeg の別途インストールを求めずに済み、合成動画でのテストもしやすい。動画入力は `framelift[video]` の extras に分け、画像だけを使う人の依存を軽くする。各入力の sha256 を計算し、出所として記録する。
+画像ファイル群と動画ファイルを受け付ける。動画は拡張子（`.mp4`・`.mov`・`.m4v`・`.mkv`・`.webm`）で見分け、PyAV でデコードする。PyAV は wheel に FFmpeg が同梱されているので、利用者に FFmpeg の別途インストールを求めずに済み、合成動画でのテストもしやすい。動画入力は `framelift[video]` の extras に分け、画像だけを使う人の依存を軽くする。動画があるのに extra がなければ、モデルを呼ぶ前に案内付きで止める。各入力の sha256 を計算し、出所として記録する。動画はファイル全体を読み込まず、少しずつ読んで計算する。動画のハッシュはデコードの前に計算し、デコードしたあとに照合し直さないので、その間にファイルが差し替えられると、記録した sha256 とデコードした中身が食い違う。
 
 #### フレーム抽出と重複除去
 
-シーン検出フィルタには頼らず、一定間隔（例として毎秒 4 フレーム）で取り出し、知覚ハッシュ（pHash）のハミング距離で画面の切り替わりを検出する。区切った区間の中から、ラプラシアン分散が最大の、つまり最もブレていないフレームを代表に選ぶ。スクロール中のブレたフレームを抽出に回さないため。間隔としきい値は設定で変えられる。
+シーン検出フィルタには頼らず、一定間隔（既定は毎秒 4 フレーム、`frame_rate`）で標本を取り、画面が止まっている間を 1 つの区間にまとめる。区間の中から、ラプラシアン分散が最大の、つまり最もブレていない標本を代表に選び、モデルに送る。スクロール中のブレたフレームを抽出に回さないため。
+
+- 静止の判定には、標本を 256×256 のグレースケールに縮小し、16×16 のタイルに分けて、平均絶対差が 3（0〜255）を超えたタイルの割合を使う。直前の標本との割合と、区間の先頭の標本との割合がどちらも `motion_threshold`（既定 0.05）以下なら同じ区間に加え、どちらかが超えたら区間を切る。先頭とも比べるのは、ゆっくりしたスクロールは隣どうしの差が小さいまま画面が入れ替わるため
+- 画面全体の平均ではなく、変化したタイルの割合で判定するのは、配置が同じで文字だけが変わる切り替わりを見逃さないため。行の背景の縞がそろう行数のスクロールや、ページ・タブの切り替えがこれに当たる。全体の平均だと、文字の差が平均の中に埋もれてしまう。一方、隅の小さなアニメーションや時計、1 行だけの書き換えは変化したタイルが少ないので、静止の区間を切らない。合成画面では、行単位のスクロールやページの入れ替えで 10% 以上のタイルが変わり、符号化ノイズ・小さなアニメーション・1 行の書き換えは 2% 未満だった
+- pHash は、少しずれた画面やブレた画面も近いと判定するので、静止の判定には使わない。移動を挟んだ 2 つの静止区間は、pHash が近くても別の区間として扱う。pHash は観測記録に残すためだけに計算する
+- 標本が 2 つ未満の区間（移動中の単独の標本など）は捨てる。このため、標本が 2 つ以上入らないほど短く表示された画面は読まれない
+- 数ピクセルのずれでも文字がタイルをまたいで動くので、ゆっくりしたスクロールも動きとして扱い、その間の標本は読まない。止まらずに動き続ける画面は、動画全体で最も鮮明な標本 1 枚だけになる（下記）ので、読みたい画面では指を止める
+- 最後のフレームは、動画の終わりまで表示されているものとして数える。終わりの時刻は、フレームの長さ、ストリームの長さ、コンテナの長さの順に取る。画面が変わったときだけフレームを書く可変フレームレートの録画では、最後の静止画面がフレーム 1 枚になるため
+- 静止区間が 1 つもない動画は、最も鮮明な標本を 1 枚だけ読む
+- 動画の表示回転（`frame.rotation`）を適用してから判定し、送る
+- 区間を閉じたらすぐ代表を渡すので、長い動画でもメモリの使用量は一定になる
+- モデルを呼ばずに代表フレームだけを確かめる `framelift frames` を用意する
 
 #### 画面判定
 
@@ -103,25 +114,35 @@ graph LR
 
 #### 構造化抽出
 
-Pydantic AI の `Agent` に、`output_type` と切り出した画像（`BinaryContent`）を渡す。`validators` は出力検証として登録し、`ModelRetry` で再試行させる（上限回数は `Pipeline` の `max_retries`）。再試行を使い切った画像は `status: "error"` として記録し、1 枚の失敗で全体は止めない。モデルは `"provider:model"` の文字列で指定し、差し替えられる。トークン使用量と処理時間を記録する。
+Pydantic AI の `Agent` に、`output_type` と切り出した画像（`BinaryContent`）を渡す。`validators` は出力検証として登録し、`ModelRetry` で再試行させる（上限回数は `Pipeline` の `max_retries`）。再試行を使い切った画像は `status: "error"` として記録し、1 枚の失敗で全体は止めない。読めない画像・動画も `status: "error"`、`frame: null` の観測として記録して次の入力へ進み、壊れる前に読めたフレームの結果は残す。途中で壊れている動画、フレームが 1 つもない動画、権限がない・途中で消えたなどでファイルを開けないものもこれに含む。ファイルを開けなければ `source.sha256` も null にする。モデルは `"provider:model"` の文字列で指定し、差し替えられる。トークン使用量と処理時間を記録する。
 
 結果は「切り出し画像のハッシュ・モデル名・`Profile.version`」をキーにローカルにキャッシュし、再実行や評価の繰り返しで同じ画像に課金しない。
 
 #### 集約
 
-スクロールした一覧では、同じ項目が複数のフレームに映る。`item_key` で項目を束ね、フィールドごとに多数決を取る。票が割れたフィールドは決め打ちせず `conflicts` として出力に残す。各項目には根拠になったフレームの一覧を付け、1 枚にしか映らなかった項目は `votes: 1` で区別できるようにする。
+スクロールした一覧では、同じ項目が複数のフレームに映る。1 回の実行の、検証を通ったすべての観測（動画・静止画をまたぐ）から、`item_key` で項目を束ね、多数決を取る。各項目には根拠になったフレームの一覧を付け、1 枚にしか映らなかった項目は `votes: 1` で区別できるようにする。
+
+- `votes` は項目が映ったフレームの数。1 フレームに同じキーが 2 回あれば、最初の 1 つだけを使う
+- キーは JSON にした形で束ねる。`Enum` とその値のように、JSON にすると同じになるキーは 1 つの項目になる。JSON にできないキーは `str(key)` で書き出すが、束ねるのはキーそのもので行う。文字列にすると同じになるだけの別のキーを 1 つにまとめないため
+- 項目の値は、観測記録と同じく出力モデル自身のシリアライズ設定で書く。別名（alias）で書き出すモデルなら、`items.jsonl` も別名になる
+- `item_key` が例外を投げた項目は集約から外し、件数を `RunResult.unkeyed_items` に数える。正常に返した `None` は有効なキー
+- 項目がすべて dict ならフィールドごとに、そうでなければ（`RootModel` の項目など）項目全体で投票する。フィールドがない観測は棄権し、明示的な `null` は 1 票に数える
+- 最多票が同数で並んだら決め打ちせず、そのフィールドを null にする。値が 2 種類以上あったものは、最多票が決まった場合も `conflicts` に全候補と票数を残す（票数の多い順、同数なら値の順）
+- `item_key` がない `Profile` では集約しない
+- モデルの呼び出しが検証の失敗以外のエラー（プロバイダの拒否など）で止まった場合も、それまでに読んだ分の `items.jsonl` を書いてから例外を投げる。`observations.jsonl` と同じく、途中までの結果を残すため
 
 ### 出力形式
 
 スキーマにはバージョンを付ける。形式を変えるときは版（`v1` の部分）を上げる。
 
-`observations.jsonl`（画像・フレーム単位）の `framelift/observation/v1` は 0.0.1 で実装済み。
+`observations.jsonl`（画像・フレーム単位）は 0.2 で `framelift/observation/v2` にした。v1 からの変更は、`source.phash` を、モデルに送った画像を表す `frame` に移したこと。
 
 ```jsonc
-{"schema": "framelift/observation/v1",
+{"schema": "framelift/observation/v2",
  "status": "ok",
  "profile": {"name": "fantasy-shop", "version": "1"},
- "source": {"path": "shots/shop-000.png", "sha256": "...", "phash": "..."},
+ "source": {"path": "recording.mp4", "sha256": "..."},
+ "frame": {"index": 3, "timestamp_ms": 2250, "sha256": "...", "phash": "..."},
  "data": {"shop_name": "...", "items": [...]},
  "error": null,
  "model": "anthropic:<model>",
@@ -129,17 +150,28 @@ Pydantic AI の `Agent` に、`output_type` と切り出した画像（`BinaryCo
  "retries": 0}
 ```
 
-動画入力と切り出しを入れるときに、版を上げて `frame`（`index`・`timestamp_ms`・`phash`）と `crop`（`bbox`）を足す。
+- `source` は入力ファイル（画像か動画）
+- `frame` はモデルに送った画像。`index` は入力ファイル内で選んだフレームの通し番号、`sha256` は送った PNG のバイト列のハッシュ
+- `timestamp_ms` はストリームの先頭からの時間。開始時刻が 0 でない mov・mkv・webm でも、最初のフレームが 0 近くになる
+- 静止画では `index: 0`、`timestamp_ms: null` で、`frame.sha256` は `source.sha256` と同じ
+- 入力そのものを読めなかったときは、何も送っていないので `frame` は null
 
-`items.jsonl`（集約後）は 0.2 で入れる。
+切り出しを入れる 0.3 で、版を上げて `crop`（`bbox`）を足す。
+
+`items.jsonl`（集約後）は 0.2 で入れた。`Profile.item_key` があるときだけ書く。
 
 ```jsonc
 {"schema": "framelift/item/v1", "key": "Moon Herb",
  "data": {"name": "Moon Herb", "price": 120}, "votes": 3,
- "conflicts": [], "evidence": [{"source_sha256": "...", "timestamp_ms": 33000}]}
+ "conflicts": [{"field": "price", "values": [{"value": 120, "votes": 2}, {"value": 12, "votes": 1}]}],
+ "evidence": [{"source_sha256": "...", "frame_index": 1, "timestamp_ms": 2250},
+              {"source_sha256": "...", "frame_index": 2, "timestamp_ms": 5300},
+              {"source_sha256": "...", "frame_index": 3, "timestamp_ms": 8100}]}
 ```
 
-出力時に、パスを落として sha256 だけを残す匿名化を選べる（`Pipeline(anonymize_paths=True)`）。
+`conflicts` の `field` は、項目全体で投票したときは null になる。`evidence` は票を入れたフレームごとに 1 件で、件数は常に `votes` と同じ。パスは入れず、ハッシュだけを残す。
+
+出力時に、パスを落として sha256 だけを残す匿名化を選べる（`Pipeline(anonymize_paths=True)`）。読めない入力のエラー文も、パスを含めずに原因だけを書く（「Not a readable image (No such file or directory)」など）。パスを置換で消す方式だと、エスケープされた形のパスが残り、短いパスでは文言まで書き換えてしまうため。
 
 ### 評価ハーネス
 
@@ -175,13 +207,15 @@ cases:
 
 ### 合成サンプル
 
-架空のショップ画面を Pillow で描画し、画像・動画・正解を自動で生成する（`framelift synth`）。正解は評価にそのまま使える `dataset.yaml` として書き出す。架空の店名・商品名・価格で一覧 UI を描き、画面の向き、スクロール、JPEG 圧縮、ノイズ、解像度を変えられる。
+架空のショップ画面を Pillow で描画し、画像・動画・正解を自動で生成する（`framelift synth`）。架空の店名・商品名・価格で一覧 UI を描き、画面の向き、スクロール、JPEG 圧縮、ノイズ、解像度を変えられるようにする。画像の正解は評価にそのまま使える `dataset.yaml` として書き出す。
+
+動画（`--videos N`）は横向きの画面で、一覧の表示領域は 6 行分の高さで、行が途中で切れない。静止（1.5 秒）と 3 行分のスクロール（0.6 秒、ブレを再現）を最下部まで繰り返すので、隣り合う静止画面には同じ項目が映る。動画の評価は要望が出てから入れるので、動画の正解ファイルは書かない。テストでは生成関数が返す、静止区間ごとの表示項目を使う。
 
 正解が自動で得られるので、公開できる評価データセットとして使える。README には合成データでのベンチマークを載せ、実際の画面での結果は「非公開のデータセットでの集計」として補足する。テスト用の合成動画（スクロールするショップ画面）も同じ生成器で作る。リポジトリに置くサンプル画像は少数（`samples/`）に限り、それ以外は生成スクリプトで再現する。
 
 ### プライバシー
 
-処理はローカルで行い、外部に送るのは切り出しと塗りつぶしを済ませた画像だけ。既定の送信ポリシーも「切り出し後の画像のみ」にする（画面にはチャットや他のプレイヤー名など、無関係な個人情報が映るため）。切り出しを入れる 0.3 までは、利用者が渡した画像をそのまま送る。テレメトリは持たない。Logfire は任意の依存で、既定では無効。キャッシュと出力はローカルのディレクトリにだけ書く。
+処理はローカルで行い、外部に送るのは切り出しと塗りつぶしを済ませた画像だけ。既定の送信ポリシーも「切り出し後の画像のみ」にする。画面には、チャットや他のプレイヤー名など、無関係な個人情報が映るため。切り出しを入れる 0.3 までは、利用者が渡した画像と、動画から選んだフレームをそのまま送る。テレメトリは持たない。Logfire は任意の依存で、既定では無効。キャッシュと出力はローカルのディレクトリにだけ書く。
 
 ### テスト
 
@@ -197,16 +231,16 @@ Typer で実装する。
 | コマンド | 用途 | 版 |
 | --- | --- | --- |
 | `framelift run <inputs...> --profile pkg.module:obj --model ... --out DIR` | 抽出 | 0.0.1 |
-| `framelift synth --out DIR --n 100` | 合成サンプルの生成 | 0.0.1 |
+| `framelift synth --out DIR --n 100 [--videos N]` | 合成サンプルの生成（`--videos` は 0.2） | 0.0.1 |
 | `framelift eval <dataset.yaml> --profile ... --model ... [--root DIR] [--matrix matrix.yaml]` | 評価（`--matrix` は 0.3） | 0.1 |
-| `framelift frames <video> --out DIR` | フレーム抽出と重複除去の結果だけを確認する（デバッグ用） | 0.2 |
+| `framelift frames <video> --out DIR [--frame-rate] [--motion-threshold]` | モデルに送る代表フレームと `frames.jsonl` だけを書き出して確認する（デバッグ用） | 0.2 |
 
 ### パッケージングとリリース
 
 - ライセンスは MIT
 - uv・ruff・ty、`py.typed` 付き。対応 Python は 3.12 以上
 - 型チェックは ty（Astral）。Pydantic のモデル（`Field`・`ConfigDict` など）を解釈できる。まだベータの 0.x 系で、リリース間で診断が変わりうるため、バージョンを固定し、Renovate の更新 PR で差分を確認してから上げる。設定は `pyproject.toml` の `[tool.ty]` に置く
-- 主な依存は pydantic、pydantic-ai-slim、Pillow、imagehash、PyYAML、Typer。extras は `video`（PyAV）、`eval`（pydantic-evals）、`anthropic` / `openai` / `google`（各プロバイダ）
+- 主な依存は pydantic、pydantic-ai-slim、Pillow、imagehash、numpy、PyYAML、Typer。extras は `video`（PyAV）、`eval`（pydantic-evals）、`anthropic` / `openai` / `google`（各プロバイダ）
 - CI は対応 Python のマトリクスで ruff・ty・pytest を実行し、wheel をクリーンな環境に入れて CLI を動かす
 - main の `pyproject.toml` の版が変わると、`release.yml` がタグと GitHub Release を作り、GitHub Actions から Trusted Publishing で PyPI に公開する（秘密情報を持たない）
 - 0.x 系で、破壊的変更を許す。CHANGELOG は Conventional Commits をもとに書き、依存は Renovate で追随する
@@ -218,14 +252,14 @@ Typer で実装する。
 | --- | --- |
 | 0.0.1 | 画像入力、構造化抽出（検証・再試行）、`observations.jsonl`、合成サンプル（静止画）、CLI の `run`・`synth`（実装済み） |
 | 0.1 | 評価ハーネス（データセット形式、項目単位の評価器、`framelift eval`）、`Profile.item_key`、synth の `dataset.yaml`（実装済み） |
-| 0.2 | 動画入力、フレーム抽出と重複除去、集約と `items.jsonl`、合成動画 |
+| 0.2 | 動画入力、フレーム抽出と重複除去、集約と `items.jsonl`、合成動画、観測記録 v2（実装済み） |
 | 0.3 | 画面判定、切り出し（`model` / `fixed`）と塗りつぶし、キャッシュ、総当たり比較 |
 | 1.0 | 最初の利用者での運用を経て、公開 API を確定 |
 
 ## 決定事項
 
 - 動画のデコードは PyAV（wheel に FFmpeg が同梱され、利用者の追加インストールが不要。テストもしやすい）
-- 画面の切り替わりは「一定間隔の抽出＋pHash の差」で検出し、区間内で最も鮮明なフレームを採用する（スクロール中のブレたフレームを避け、依存も少ない）
+- 画面の切り替わりは「一定間隔の抽出＋縮小画像のタイルのうち変化した割合による静止判定」で検出し、区間内で最も鮮明なフレームを採用する（スクロール中のブレたフレームを避け、依存も少ない）。当初は pHash の差で区切る予定だったが、pHash はずれやブレに強く作られているので、スクロール中の標本と静止画面を区別できなかった。画面全体の平均差も、配置が同じで文字だけが変わる切り替わりを見逃したので、タイル単位にした
 - 既定の送信ポリシーは切り出し後の画像のみ（無関係な個人情報を外部に送らない）
 - 公開 API は `Profile` と `Pipeline` の設定に限る（使われない拡張点を 0.x のうちに約束しない）
 - 合成サンプルの生成器を同梱し、公開ベンチマークに使う（実画面を公開せずに評価結果を示せる）

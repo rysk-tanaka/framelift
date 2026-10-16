@@ -1,31 +1,81 @@
-"""`Pipeline`: run a `Profile` over images and write ``observations.jsonl``."""
+"""`Pipeline`: run a `Profile` over images and videos, writing ``observations.jsonl`` and
+``items.jsonl``."""
 
 from __future__ import annotations
 
+from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
 
+from framelift._internal.aggregate import Aggregator
 from framelift._internal.extract import Extractor
-from framelift._internal.sources import expand_inputs, load_image
+from framelift._internal.items import item_keyer
+from framelift._internal.sources import (
+    UnreadableInputError,
+    error_reason,
+    expand_inputs,
+    hash_file,
+    is_video,
+    load_image,
+)
+from framelift._internal.video import (
+    DEFAULT_FRAME_RATE,
+    DEFAULT_MOTION_THRESHOLD,
+    check_sampling,
+    frame_to_source,
+    import_av,
+    sample_video,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Generator, Iterable
+    from typing import TextIO
 
     from pydantic_ai.models import Model
 
+    from framelift._internal.sources import ImageSource
+    from framelift.item import Item
     from framelift.observation import Observation
     from framelift.profile import Profile
 
 OBSERVATIONS_FILE = "observations.jsonl"
+ITEMS_FILE = "items.jsonl"
+
+
+@dataclass(frozen=True)
+class _Unreadable:
+    """An input (or the rest of a video) that could not be read or decoded."""
+
+    error: UnreadableInputError
+
+    @property
+    def path(self) -> Path:
+        return self.error.path
+
+    @property
+    def sha256(self) -> str | None:
+        """None when the file itself could not be read."""
+        return self.error.sha256
 
 
 @dataclass
 class RunResult:
+    """What a `Pipeline.run` produced."""
+
     observations: list[Observation] = field(default_factory=list)
     output_path: Path | None = None
+    """``observations.jsonl``, when the pipeline has an ``out_dir``."""
+    items: list[Item] = field(default_factory=list)
+    """List items merged across frames; empty when the profile has no ``item_key``."""
+    items_path: Path | None = None
+    """``items.jsonl``, when the pipeline has an ``out_dir`` and the profile an ``item_key``."""
+    unkeyed_items: int = 0
+    """Extracted items left out of ``items`` because ``item_key`` failed on them."""
+    unkeyed_error: str | None = None
+    """The first such ``item_key`` failure, e.g. ``"KeyError('name')"``."""
 
     @property
     def succeeded(self) -> list[Observation]:
@@ -37,14 +87,21 @@ class RunResult:
 
 
 class Pipeline[OutputT: BaseModel]:
-    """Extract ``profile.output_type`` from every input image.
+    """Extract ``profile.output_type`` from every input image and from the still screens of
+    every input video.
 
     Args:
         profile: What to read.
         model: A Pydantic AI model or a ``"provider:model"`` string.
-        out_dir: Where to write ``observations.jsonl``. ``None`` keeps results in memory only.
+        out_dir: Where to write ``observations.jsonl`` (and ``items.jsonl`` when the profile has
+            an ``item_key``). ``None`` keeps results in memory only.
         max_retries: How many times a failed validation may ask the model to try again.
         anonymize_paths: Omit input paths from observations, keeping only hashes.
+        frame_rate: How many video frames per second to examine.
+        motion_threshold: How much of the screen (the share of 16x16 tiles, 0-1) may change
+            between a video sample and the previous sample, and between it and the first sample
+            of its still screen, for it to still belong to that screen. Only the sharpest sample
+            of each still screen is sent to the model.
     """
 
     def __init__(
@@ -55,36 +112,146 @@ class Pipeline[OutputT: BaseModel]:
         out_dir: str | Path | None = None,
         max_retries: int = 2,
         anonymize_paths: bool = False,
+        frame_rate: float = DEFAULT_FRAME_RATE,
+        motion_threshold: float = DEFAULT_MOTION_THRESHOLD,
     ) -> None:
         if max_retries < 0:
             raise ValueError("max_retries must be >= 0")
+        check_sampling(frame_rate, motion_threshold)
         self.profile = profile
         self.model = model
         self.out_dir = Path(out_dir) if out_dir is not None else None
         self.anonymize_paths = anonymize_paths
+        self.frame_rate = frame_rate
+        self.motion_threshold = motion_threshold
         self._extractor = Extractor(profile, model, max_retries=max_retries)
 
     def run(self, inputs: str | Path | Iterable[str | Path]) -> RunResult:
-        """Process the inputs in order. A failure on one image does not stop the run."""
+        """Process the inputs in order.
+
+        A failure on one input does not stop the run: an image or video that cannot be read (or
+        a video that breaks off partway) and a frame whose output fails validation are recorded
+        as ``status: "error"`` observations, and frames read before a video broke off are kept.
+        Any other error, such as the model provider refusing a request, stops the run and is
+        raised; ``items.jsonl`` is still written for the frames read until then, like
+        ``observations.jsonl``.
+
+        Raises `FileNotFoundError` when an input matches nothing, and `MissingVideoExtraError`
+        (an `ImportError`) when a video is given without the ``video`` extra, before any model is
+        called.
+        """
         items = [inputs] if isinstance(inputs, str | Path) else list(inputs)
         paths = expand_inputs(items)
+        if any(is_video(path) for path in paths):
+            # Directories and globs pick up videos too, so say how to read only the images.
+            import_av(hint="; to read only the images, pass them alone (e.g. 'shots/*.png')")
 
+        keyer = item_keyer(self.profile)
+        aggregator = Aggregator(keyer) if keyer is not None else None
         result = RunResult()
         writer = None
         if self.out_dir is not None:
             self.out_dir.mkdir(parents=True, exist_ok=True)
+            # observations.jsonl is rewritten below; an items.jsonl left by an earlier run must
+            # not sit next to it when this run writes none, because the profile has no item_key
+            # or the output could not be written.
+            (self.out_dir / ITEMS_FILE).unlink(missing_ok=True)
             result.output_path = self.out_dir / OBSERVATIONS_FILE
             writer = result.output_path.open("w", encoding="utf-8")
         try:
-            for path in paths:
-                observation, _ = self._extractor.observe(
-                    load_image(path), anonymize_paths=self.anonymize_paths
-                )
-                result.observations.append(observation)
-                if writer is not None:
-                    writer.write(observation.to_json() + "\n")
-                    writer.flush()
-        finally:
-            if writer is not None:
-                writer.close()
+            # Closed explicitly, so an error that stops the run does not leave a video open for
+            # as long as the caller holds the exception.
+            with closing(self._images(paths)) as images:
+                for image in images:
+                    self._record(image, writer, aggregator, result)
+        except BaseException as exc:
+            # The items read so far are written even when an error stops the run, to match the
+            # observations already written; if that fails too, the original error is kept.
+            try:
+                self._finish(writer, aggregator, result)
+            except OSError as write_error:
+                exc.add_note(f"framelift could not write its output either: {write_error}")
+            raise
+        self._finish(writer, aggregator, result)
         return result
+
+    def _record(
+        self,
+        image: ImageSource | _Unreadable,
+        writer: TextIO | None,
+        aggregator: Aggregator | None,
+        result: RunResult,
+    ) -> None:
+        if isinstance(image, _Unreadable):
+            # The reason alone when paths are anonymized: read errors quote the path.
+            error = image.error.without_path if self.anonymize_paths else str(image.error)
+            observation = self._extractor.unreadable(
+                image.path, image.sha256, error, anonymize_paths=self.anonymize_paths
+            )
+            output = None
+        else:
+            observation, output = self._extractor.observe(
+                image, anonymize_paths=self.anonymize_paths
+            )
+        result.observations.append(observation)
+        if aggregator is not None:
+            aggregator.add(observation, output)
+        if writer is not None:
+            writer.write(observation.to_json() + "\n")
+            writer.flush()
+
+    def _finish(
+        self, writer: TextIO | None, aggregator: Aggregator | None, result: RunResult
+    ) -> None:
+        if writer is not None:
+            writer.close()
+        if aggregator is not None:
+            self._write_items(aggregator, result)
+
+    def _write_items(self, aggregator: Aggregator, result: RunResult) -> None:
+        result.items = aggregator.items()
+        result.unkeyed_items = aggregator.unkeyed
+        result.unkeyed_error = aggregator.unkeyed_error
+        if self.out_dir is not None:
+            result.items_path = self.out_dir / ITEMS_FILE
+            with result.items_path.open("w", encoding="utf-8") as fh:
+                fh.writelines(item.to_json() + "\n" for item in result.items)
+
+    def _images(self, paths: list[Path]) -> Generator[ImageSource | _Unreadable, None, None]:
+        for path in paths:
+            # Only reading and decoding is guarded here; errors while extracting happen in the
+            # caller, outside this generator, and are not mistaken for an unreadable input.
+            # OSError covers a file that cannot be opened, was removed after the inputs were
+            # expanded, or fails to read; like a corrupt file, it is one unreadable input.
+            kind = "video" if is_video(path) else "image"
+            if kind == "image":
+                try:
+                    image = load_image(path)
+                except UnreadableInputError as exc:
+                    yield _Unreadable(exc)
+                    continue
+                except OSError as exc:
+                    yield _Unreadable(UnreadableInputError(kind, path, error_reason(exc)))
+                    continue
+                yield image
+                continue
+            try:
+                source_sha256 = hash_file(path)
+            except OSError as exc:
+                yield _Unreadable(UnreadableInputError(kind, path, error_reason(exc)))
+                continue
+            frames = sample_video(
+                path, frame_rate=self.frame_rate, motion_threshold=self.motion_threshold
+            )
+            try:
+                with closing(frames):
+                    for frame in frames:
+                        yield frame_to_source(path, source_sha256, frame)
+            except UnreadableInputError as exc:
+                exc.sha256 = source_sha256
+                yield _Unreadable(exc)
+            # Other ValueErrors come from decoding too, e.g. PyAV for a pixel format it cannot
+            # convert.
+            except (ValueError, OSError) as exc:
+                error = UnreadableInputError(kind, path, error_reason(exc), sha256=source_sha256)
+                yield _Unreadable(error)

@@ -13,6 +13,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    RootModel,
     computed_field,
     field_serializer,
     field_validator,
@@ -577,3 +578,40 @@ def test_a_reordering_list_serializer_keeps_keys_and_values_together() -> None:
     raw_output = {"rows": [{"title": "a", "parts": []}, {"title": "b", "parts": []}]}
 
     assert _mismatches(profile, expected, raw_output) == (4, 0, [])
+
+
+def test_a_none_key_is_a_valid_key() -> None:
+    profile = Profile(
+        name="p", output_type=MaybeTable, instructions="read", item_key=lambda r: r.name
+    )
+    raw = {"rows": [{"name": None}, {"name": "a"}]}
+
+    assert _mismatches(profile, raw, raw) == (2, 0, [])
+
+
+def test_unhashable_keys_on_extracted_items_count_as_misreads() -> None:
+    profile = Profile(
+        name="p",
+        output_type=MaybeTable,
+        instructions="read",
+        item_key=lambda r: r.name if r.name is not None else [],  # ty: ignore[invalid-argument-type]
+    )
+    raw_output = {"rows": [{"name": None}, {"name": "a"}]}
+
+    assert _mismatches(profile, {"rows": [{"name": "a"}]}, raw_output) == (1, 0, [])
+
+
+class Tag(RootModel[str]):
+    pass
+
+
+class Tags(BaseModel):
+    tags: list[Tag]
+
+
+def test_items_that_are_not_objects_are_paired_by_key() -> None:
+    profile = Profile(name="p", output_type=Tags, instructions="read", item_key=lambda t: t.root)
+    expected = {"tags": ["a", "b"]}
+
+    assert _mismatches(profile, expected, {"tags": ["b", "a"]}) == (2, 0, [])
+    assert _mismatches(profile, expected, {"tags": ["a"]}) == (2, 1, ["tags['b'] (missing)"])

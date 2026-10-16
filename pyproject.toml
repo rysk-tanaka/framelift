@@ -21,6 +21,7 @@ classifiers = [
 ]
 dependencies = [
     "imagehash>=4.3",
+    "numpy>=2",
     "pillow>=12",
     "pydantic>=2.14",
     "pydantic-ai-slim>=2.57",

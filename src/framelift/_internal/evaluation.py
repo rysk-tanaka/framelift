@@ -16,21 +16,20 @@ from pydantic_evals.evaluators import EvaluationReason, Evaluator, EvaluatorCont
 
 from framelift._internal.dataset import load_dataset
 from framelift._internal.extract import Extractor, model_label
+from framelift._internal.items import ItemKeyer, dump_item, item_keyer
 from framelift._internal.sources import load_image
-from framelift.profile import item_field
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Hashable
     from pathlib import Path
 
     from pydantic_ai.models import Model
     from pydantic_evals.reporting import EvaluationReport
 
+    from framelift._internal.items import ItemKey
     from framelift.observation import Observation
     from framelift.profile import Profile
 
 type Expected = dict[str, Any]
-type ItemKey = Hashable
 # pydantic-evals gives expected_output the task's output type, but here the task returns a
 # `CaseOutput` and the expected output is an `ExpectedOutput`, so the types stay open.
 type Output = Any
@@ -127,21 +126,15 @@ def normalize_expected(output_type: type[BaseModel], expected: Expected) -> Expe
     return _validate_expected(output_type, expected)[0]
 
 
-def _dump(model: BaseModel) -> Any:
-    return model.model_dump(mode="json", by_alias=False)
-
-
 @dataclass(frozen=True)
 class _ItemMatcher:
     """Keys list items with `Profile.item_key` so expected and extracted items can be paired."""
 
-    field_name: str
-    key: Callable[[Any], ItemKey]
+    keyer: ItemKeyer
 
-    def _key(self, model: Any) -> ItemKey:
-        key = self.key(model)
-        hash(key)  # raises TypeError now rather than deep inside the scoring
-        return key
+    @property
+    def field_name(self) -> str:
+        return self.keyer.field_name
 
     def expected(self, output_type: type[BaseModel], raw: Expected) -> ExpectedOutput:
         values, output = _validate_expected(output_type, raw)
@@ -149,36 +142,29 @@ class _ItemMatcher:
             return ExpectedOutput(values, None)
         models = getattr(output, self.field_name) or []
         try:
-            keys = [self._key(model) for model in models]
+            keys = [self.keyer.key_of(model) for model in models]
         # item_key is user code and may raise anything; report it as a dataset error.
         except Exception as exc:
             raise ValueError(f"item_key failed on an expected item: {exc!r}") from exc
         # Each item's value comes from its own model, like its key, so a list serializer that
         # reorders items cannot pair one item's key with another's values.
         values[self.field_name] = [
-            _restrict(_dump(model), item, f"{self.field_name}[{index}].")
+            _restrict(dump_item(model), item, f"{self.field_name}[{index}].")
             for index, (model, item) in enumerate(zip(models, raw[self.field_name], strict=True))
         ]
         return ExpectedOutput(values, keys)
 
     def output_items(self, output: BaseModel) -> list[tuple[ItemKey, Any]]:
-        # An optional list may be None, which means no items.
-        models = getattr(output, self.field_name) or []
-        return [(self._output_key(model), _dump(model)) for model in models]
-
-    def _output_key(self, model: Any) -> ItemKey:
-        try:
-            return self._key(model)
-        # An extracted item item_key cannot handle (e.g. a None it does not expect) is a misread,
-        # not a crash: a fresh object matches no expected item and still counts as output.
-        except Exception:
-            return object()
+        # An extracted item item_key cannot handle gets a fresh object as its key: it matches no
+        # expected item and still counts as output.
+        return [
+            (item.key if item.has_key else object(), item.dump) for item in self.keyer.items(output)
+        ]
 
 
 def _matcher(profile: Profile) -> _ItemMatcher | None:
-    if profile.item_key is None:
-        return None
-    return _ItemMatcher(item_field(profile.output_type)[0], profile.item_key)
+    keyer = item_keyer(profile)
+    return _ItemMatcher(keyer) if keyer is not None else None
 
 
 def expected_output(profile: Profile, raw: Expected) -> ExpectedOutput:

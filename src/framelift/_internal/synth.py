@@ -10,13 +10,17 @@ import hashlib
 import io
 import random
 from dataclasses import asdict, dataclass
+from fractions import Fraction
 from typing import TYPE_CHECKING, Literal
 
+import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 from framelift._internal.dataset import DatasetCase, write_dataset
+from framelift._internal.video import import_av
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
     from pathlib import Path
 
 Orientation = Literal["portrait", "landscape"]
@@ -50,35 +54,49 @@ class SampleTruth:
     items: list[SampleItem]
 
 
-def _random_truth(rng: random.Random, file: str, orientation: Orientation) -> SampleTruth:
+def _random_truth(
+    rng: random.Random, file: str, orientation: Orientation, count: int | None = None
+) -> SampleTruth:
     shop = f"{rng.choice(_SHOP_PREFIXES)} {rng.choice(_SHOP_SUFFIXES)}"
     names: set[str] = set()
-    count = rng.randint(_MIN_ITEMS, _max_rows(orientation))
+    if count is None:
+        count = rng.randint(_MIN_ITEMS, _max_rows(orientation))
+    if count > len(_ITEM_ADJECTIVES) * len(_ITEM_NOUNS):
+        raise ValueError("too many items for the fictional item names")
     while len(names) < count:
         names.add(f"{rng.choice(_ITEM_ADJECTIVES)} {rng.choice(_ITEM_NOUNS)}")
     items = [SampleItem(name=n, price=rng.randrange(10, 2000, 5)) for n in sorted(names)]
     return SampleTruth(file=file, orientation=orientation, shop_name=shop, items=items)
 
 
-def render(truth: SampleTruth) -> Image.Image:
-    """Draw a simple shop screen for ``truth``."""
-    width, height = _SIZES[truth.orientation]
-    image = Image.new("RGB", (width, height), (34, 30, 46))
-    draw = ImageDraw.Draw(image)
+_BACKGROUND = (34, 30, 46)
+
+
+def _draw_header(draw: ImageDraw.ImageDraw, width: int, shop_name: str) -> None:
     title = ImageFont.load_default(size=40)
-    body = ImageFont.load_default(size=30)
-
     draw.rectangle((0, 0, width, _HEADER_HEIGHT), fill=(70, 52, 96))
-    draw.text((32, 34), truth.shop_name, font=title, fill=(250, 236, 200))
+    draw.text((32, 34), shop_name, font=title, fill=(250, 236, 200))
 
-    for index, item in enumerate(truth.items):
-        y = _LIST_TOP + index * _ROW_HEIGHT
+
+def _draw_rows(draw: ImageDraw.ImageDraw, width: int, top: int, items: list[SampleItem]) -> None:
+    body = ImageFont.load_default(size=30)
+    for index, item in enumerate(items):
+        y = top + index * _ROW_HEIGHT
         fill = (52, 46, 70) if index % 2 == 0 else (44, 39, 60)
         draw.rounded_rectangle((24, y, width - 24, y + _ROW_HEIGHT - 12), radius=12, fill=fill)
         draw.text((48, y + 20), item.name, font=body, fill=(235, 235, 245))
         price = f"{item.price} G"
         price_width = draw.textlength(price, font=body)
         draw.text((width - 48 - price_width, y + 20), price, font=body, fill=(255, 214, 102))
+
+
+def render(truth: SampleTruth) -> Image.Image:
+    """Draw a simple shop screen for ``truth``."""
+    width, height = _SIZES[truth.orientation]
+    image = Image.new("RGB", (width, height), _BACKGROUND)
+    draw = ImageDraw.Draw(image)
+    _draw_header(draw, width, truth.shop_name)
+    _draw_rows(draw, width, _LIST_TOP, truth.items)
     return image
 
 
@@ -115,3 +133,154 @@ def generate(out_dir: Path, *, n: int, seed: int = 0) -> list[SampleTruth]:
         cases.append(_to_case(truth, data))
     write_dataset(out_dir / DATASET_FILE, cases)
     return truths
+
+
+# Scrolling video: a landscape screen whose list area shows exactly _VIEW_ROWS rows, so no row is
+# ever cut off at a still position. Rows are scrolled _SCROLL_ROWS at a time.
+_VIDEO_SIZE = _SIZES["landscape"]
+_VIEW_ROWS = 6
+_VIEW_HEIGHT = _VIEW_ROWS * _ROW_HEIGHT
+_SCROLL_ROWS = 3
+_HOLD_SECONDS = 1.5
+_SCROLL_SECONDS = 0.6
+_BLUR_STEPS = 8
+
+
+@dataclass(frozen=True)
+class Hold:
+    """A still part of a synthetic video."""
+
+    start_ms: int
+    end_ms: int
+    items: list[SampleItem]
+    """Items whose whole row is visible."""
+
+
+@dataclass(frozen=True)
+class SampleVideo:
+    """A synthetic video's ground truth: every item, and what each still part shows."""
+
+    truth: SampleTruth
+    holds: list[Hold]
+
+
+class ListView:
+    """A shop screen whose item list can be shown at any scroll offset (in pixels)."""
+
+    def __init__(self, truth: SampleTruth) -> None:
+        width, _ = _VIDEO_SIZE
+        self.truth = truth
+        canvas = Image.new("RGB", (width, len(truth.items) * _ROW_HEIGHT), _BACKGROUND)
+        _draw_rows(ImageDraw.Draw(canvas), width, 0, truth.items)
+        self._rows = np.asarray(canvas, dtype=np.float32)
+        frame = Image.new("RGB", _VIDEO_SIZE, _BACKGROUND)
+        draw = ImageDraw.Draw(frame)
+        _draw_header(draw, width, truth.shop_name)
+        # The footer hides the rows below the list area.
+        draw.rectangle((0, _LIST_TOP + _VIEW_HEIGHT, width, _VIDEO_SIZE[1]), fill=(70, 52, 96))
+        self._frame = frame
+
+    @property
+    def max_offset(self) -> int:
+        return max(0, (len(self.truth.items) - _VIEW_ROWS) * _ROW_HEIGHT)
+
+    def visible_items(self, offset: int) -> list[SampleItem]:
+        """Items whose whole row box is inside the list area at ``offset``."""
+        return [
+            item
+            for row, item in enumerate(self.truth.items)
+            if row * _ROW_HEIGHT >= offset
+            and row * _ROW_HEIGHT + _ROW_HEIGHT - 12 <= offset + _VIEW_HEIGHT
+        ]
+
+    def render(self, offset: float, blur: float = 0.0) -> Image.Image:
+        """The screen at ``offset``; ``blur`` averages offsets over that many pixels, like the
+        motion blur of a frame captured while scrolling."""
+        steps = _BLUR_STEPS if blur > 0 else 1
+        shifts = np.linspace(-blur / 2, blur / 2, steps) if blur > 0 else [0.0]
+        view = np.zeros((_VIEW_HEIGHT, self._rows.shape[1], 3), dtype=np.float32)
+        for shift in shifts:
+            top = round(min(max(offset + shift, 0), self.max_offset))
+            view += self._rows[top : top + _VIEW_HEIGHT]
+        image = self._frame.copy()
+        list_area = Image.fromarray((view / len(shifts)).astype(np.uint8))
+        image.paste(list_area, (0, _LIST_TOP))
+        return image
+
+
+def write_video(
+    path: Path,
+    frames: Iterable[Image.Image],
+    *,
+    fps: int,
+    rotation: int = 0,
+    timestamps_ms: Iterable[int] | None = None,
+    end_ms: int | None = None,
+) -> None:
+    """Encode frames as an H.264 MP4.
+
+    ``rotation`` sets the display rotation metadata. ``timestamps_ms`` gives each frame its own
+    time, for a variable-frame-rate video like a screen recording that only writes a frame when
+    the screen changes; without it, frames are ``1 / fps`` apart. ``end_ms`` (with
+    ``timestamps_ms``) keeps the last frame on screen until then, as a recorder does when the
+    screen stays still until it stops; otherwise the last frame lasts ``1 / fps``.
+    """
+    av = import_av("Synthetic videos")
+    times = iter(timestamps_ms) if timestamps_ms is not None else None
+    with av.open(str(path), mode="w") as container:
+        stream = container.add_stream("libx264", rate=fps)
+        stream.pix_fmt = "yuv420p"
+        if times is not None:
+            stream.codec_context.time_base = Fraction(1, 1000)
+        if rotation:
+            stream.set_display_rotation(rotation)
+        packets = []
+        last_ms = 0
+        for index, image in enumerate(frames):
+            if index == 0:  # the size can only be set before the first frame opens the codec
+                stream.width, stream.height = image.size
+            frame = av.VideoFrame.from_image(image)
+            if times is not None:
+                last_ms = next(times)
+                frame.pts, frame.time_base = last_ms, Fraction(1, 1000)
+            packets += stream.encode(frame)
+        packets += stream.encode()
+        if end_ms is not None and times is not None and packets:
+            # The encoder ignores a frame's duration, so it is set on the last packet instead.
+            last = max(packets, key=lambda packet: packet.pts)
+            last.duration = round((end_ms - last_ms) / 1000 / last.time_base)
+        for packet in packets:
+            container.mux(packet)
+
+
+def generate_video(path: Path, *, seed: int = 0, n_items: int = 12, fps: int = 10) -> SampleVideo:
+    """Write an MP4 of a shop list that stays still, scrolls a few rows, stays still...
+
+    Returns the full ground truth and, for every still part, the items fully shown in it.
+    """
+    if n_items < _VIEW_ROWS:
+        # The list area always shows _VIEW_ROWS whole rows; fewer items would not fill it.
+        raise ValueError(f"n_items must be >= {_VIEW_ROWS}")
+    rng = random.Random(seed)
+    truth = _random_truth(rng, path.name, "landscape", count=n_items)
+    view = ListView(truth)
+    step = _SCROLL_ROWS * _ROW_HEIGHT
+    stops = sorted({*range(0, view.max_offset, step), view.max_offset})
+
+    frames: list[Image.Image] = []
+    holds: list[Hold] = []
+    hold_frames = round(_HOLD_SECONDS * fps)
+    scroll_frames = round(_SCROLL_SECONDS * fps)
+    for stop_index, offset in enumerate(stops):
+        start_ms = round(len(frames) * 1000 / fps)
+        frames += [view.render(offset)] * hold_frames
+        end_ms = round(len(frames) * 1000 / fps)
+        holds.append(Hold(start_ms, end_ms, view.visible_items(offset)))
+        if stop_index + 1 < len(stops):
+            distance = stops[stop_index + 1] - offset
+            speed = distance / scroll_frames
+            frames += [
+                view.render(offset + speed * (i + 0.5), blur=speed) for i in range(scroll_frames)
+            ]
+    write_video(path, frames, fps=fps)
+    return SampleVideo(truth=truth, holds=holds)

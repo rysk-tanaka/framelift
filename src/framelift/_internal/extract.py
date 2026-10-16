@@ -12,9 +12,11 @@ from pydantic_ai.exceptions import UnexpectedModelBehavior
 from pydantic_ai.messages import RetryPromptPart
 from pydantic_ai.usage import RunUsage
 
-from framelift.observation import Observation, ProfileRef, SourceRef, Usage
+from framelift.observation import FrameRef, Observation, ProfileRef, SourceRef, Usage
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from pydantic_ai.messages import ModelMessage
     from pydantic_ai.models import Model
 
@@ -131,6 +133,22 @@ class Extractor[OutputT: BaseModel]:
         extraction = await self.extract_async(image)
         return self._observation(image, extraction, anonymize_paths), extraction.output
 
+    def unreadable(
+        self, path: Path, sha256: str | None, error: str, *, anonymize_paths: bool = False
+    ) -> Observation:
+        """An error record for an input that could not be read, so nothing was sent."""
+        return Observation(
+            status="error",
+            profile=ProfileRef(name=self._profile.name, version=self._profile.version),
+            source=SourceRef(path=None if anonymize_paths else path.as_posix(), sha256=sha256),
+            frame=None,
+            data=None,
+            error=error,
+            model=model_label(self._model),
+            usage=Usage(),
+            retries=0,
+        )
+
     def _observation(
         self, image: ImageSource, extraction: Extraction[OutputT], anonymize_paths: bool
     ) -> Observation:
@@ -140,6 +158,11 @@ class Extractor[OutputT: BaseModel]:
             profile=ProfileRef(name=self._profile.name, version=self._profile.version),
             source=SourceRef(
                 path=None if anonymize_paths else image.path.as_posix(),
+                sha256=image.source_sha256,
+            ),
+            frame=FrameRef(
+                index=image.frame_index,
+                timestamp_ms=image.timestamp_ms,
                 sha256=image.sha256,
                 phash=image.phash,
             ),
