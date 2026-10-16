@@ -17,6 +17,7 @@ from pydantic_evals.evaluators import EvaluationReason, Evaluator, EvaluatorCont
 from framelift._internal.dataset import load_dataset
 from framelift._internal.extract import Extractor, model_label
 from framelift._internal.items import ItemKeyer, dump_item, item_keyer
+from framelift._internal.layout import Layout, NoCropError
 from framelift._internal.sources import load_image
 
 if TYPE_CHECKING:
@@ -377,14 +378,24 @@ def run_evaluation(
 ) -> EvaluationReport[CaseInputs, Output, Metadata]:
     """Extract every case of a dataset from `build_dataset` and score the results."""
     extractor = Extractor(profile, model, max_retries=max_retries)
+    # The same image a run would send, so scores reflect what is cropped and redacted.
+    layout = Layout.from_profile(profile)
 
     # Async, so the agent runs on pydantic-evals' event loop: a sync task would run in worker
     # threads, each with its own loop, which a provider's cached HTTP client cannot share.
     async def extract(inputs: CaseInputs) -> CaseOutput:
-        image = load_image(inputs.image)
-        # The dataset was checked before the run; check again with the bytes actually sent, so
+        try:
+            image = load_image(inputs.image, layout)
+        except NoCropError as exc:
+            # Scored like an extraction that failed: the profile cannot read this screen.
+            if exc.sha256 != inputs.sha256:
+                raise ValueError(f"{inputs.image} changed after the dataset was checked") from exc
+            observation = extractor.unreadable(inputs.image, exc.sha256, str(exc), crop=exc.crop)
+            return CaseOutput(observation, None)
+        # The dataset was checked before the run; check again with the bytes actually read, so
         # an image replaced in between fails its case instead of being scored as another one.
-        if image.sha256 != inputs.sha256:
+        # The input file's hash, not the sent image's: a cropped image is a new PNG.
+        if image.source_sha256 != inputs.sha256:
             raise ValueError(f"{inputs.image} changed after the dataset was checked")
         observation, output = await extractor.observe_async(image)
         return CaseOutput(observation, output)

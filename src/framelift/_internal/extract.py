@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from pydantic_ai.models import Model
 
     from framelift._internal.sources import ImageSource
+    from framelift.observation import Crop
     from framelift.profile import Profile, Validator
 
 USER_PROMPT = "Extract the data shown in this screenshot."
@@ -134,14 +135,22 @@ class Extractor[OutputT: BaseModel]:
         return self._observation(image, extraction, anonymize_paths), extraction.output
 
     def unreadable(
-        self, path: Path, sha256: str | None, error: str, *, anonymize_paths: bool = False
+        self,
+        path: Path,
+        sha256: str | None,
+        error: str,
+        *,
+        anonymize_paths: bool = False,
+        crop: Crop | None = None,
     ) -> Observation:
-        """An error record for an input that could not be read, so nothing was sent."""
+        """An error record for an input that could not be read, or a screen that could not be
+        cropped (``crop`` then says its orientation), so nothing was sent."""
         return Observation(
             status="error",
             profile=ProfileRef(name=self._profile.name, version=self._profile.version),
             source=SourceRef(path=None if anonymize_paths else path.as_posix(), sha256=sha256),
             frame=None,
+            crop=crop,
             data=None,
             error=error,
             model=model_label(self._model),
@@ -166,6 +175,7 @@ class Extractor[OutputT: BaseModel]:
                 sha256=image.sha256,
                 phash=image.phash,
             ),
+            crop=image.crop,
             data=None if output is None else output.model_dump(mode="json"),
             error=extraction.error,
             model=model_label(self._model),

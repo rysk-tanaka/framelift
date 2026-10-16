@@ -11,17 +11,27 @@ import sys
 import tempfile
 import traceback
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, Any
 
+import imagehash
 import typer
 
 from framelift._internal import synth as _synth
 from framelift._internal import video as _video
+from framelift._internal.layout import Layout, NoCropError
+from framelift._internal.sources import (
+    UnreadableInputError,
+    error_reason,
+    is_video,
+    load_image,
+)
 from framelift.pipeline import Pipeline
 from framelift.profile import Profile
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
+
+    from PIL import Image
 
 app = typer.Typer(
     help="Extract structured data from screen recordings and screenshots with vision LLMs.",
@@ -197,41 +207,74 @@ def evaluate(
         raise typer.Exit(code=1)
 
 
+def _picked(
+    path: Path, layout: Layout, frame_rate: float, motion_threshold: float
+) -> Iterator[tuple[dict[str, Any], Image.Image]]:
+    """The images run would send for ``path``, each with its frames.jsonl record."""
+    if not is_video(path):
+        try:
+            source = load_image(path, layout)
+        except OSError as exc:  # the input, not --out, which the caller's OSError handler means
+            raise UnreadableInputError("image", path, error_reason(exc)) from exc
+        record = {
+            "index": 0,
+            "timestamp_ms": None,
+            "phash": source.phash,
+            "sharpness": None,
+            "crop": source.crop.model_dump(mode="json"),
+        }
+        yield record, source.view
+        return
+    for frame in _video.sample_video(
+        path, frame_rate=frame_rate, motion_threshold=motion_threshold
+    ):
+        view, crop = layout.apply(frame.image)
+        record = {
+            "index": frame.index,
+            "timestamp_ms": frame.timestamp_ms,
+            # Of the image sent, as run records it (see frame_to_source).
+            "phash": frame.phash if layout.is_identity else str(imagehash.phash(view)),
+            "sharpness": round(frame.sharpness, 2),
+            "crop": crop.model_dump(mode="json"),
+        }
+        yield record, view
+
+
 @app.command()
 def frames(
-    video: Annotated[Path, typer.Argument(help="Video file")],
+    input_path: Annotated[Path, typer.Argument(metavar="INPUT", help="Video or image file")],
     out: Annotated[Path, typer.Option(help="Output directory")] = Path("frames"),
+    profile: Annotated[
+        str | None,
+        typer.Option(
+            help="Profile whose locate and redact to apply, as 'package.module:attribute' "
+            "[default: the whole screen]"
+        ),
+    ] = None,
     frame_rate: FrameRate = _video.DEFAULT_FRAME_RATE,
     motion_threshold: MotionThreshold = _video.DEFAULT_MOTION_THRESHOLD,
 ) -> None:
-    """Write the frames run would send to the model (one per still screen), without a model."""
-    if not video.is_file():
-        raise typer.BadParameter(f"not a file: {video}", param_hint="VIDEO")
+    """Write the images run would send to the model (one per still screen of a video, cropped
+    and redacted with --profile), without calling a model."""
+    if not input_path.is_file():
+        raise typer.BadParameter(f"not a file: {input_path}", param_hint="INPUT")
+    layout = Layout.from_profile(load_profile(profile)) if profile else Layout.full()
     try:
-        picked = _video.sample_video(
-            video, frame_rate=frame_rate, motion_threshold=motion_threshold
-        )
-        # The generator opens the video on the first frame; take it before touching the output,
+        picked = _picked(input_path, layout, frame_rate, motion_threshold)
+        # The generator reads the input on the first image; take it before touching the output,
         # so a missing extra or an unreadable file leaves an earlier run's frames as they were.
         first = next(picked, None)
         out.mkdir(parents=True, exist_ok=True)
-        # Written to a staging directory and moved in only once the whole video is read, so a
+        # Written to a staging directory and moved in only once the whole input is read, so a
         # video that breaks off partway leaves an earlier run's frames untouched, and a run that
         # picks fewer frames leaves no old ones behind.
         with tempfile.TemporaryDirectory(dir=out, prefix=".frames-") as staging:
             stage = Path(staging)
             lines: list[str] = []
-            for frame in itertools.chain([first] if first is not None else [], picked):
-                file = f"frame-{frame.index:04d}.png"
-                frame.image.save(stage / file, format="PNG")
-                record = {
-                    "index": frame.index,
-                    "timestamp_ms": frame.timestamp_ms,
-                    "phash": frame.phash,
-                    "sharpness": round(frame.sharpness, 2),
-                    "file": file,
-                }
-                lines.append(json.dumps(record) + "\n")
+            for record, view in itertools.chain([first] if first is not None else [], picked):
+                file = f"frame-{record['index']:04d}.png"
+                view.save(stage / file, format="PNG")
+                lines.append(json.dumps({**record, "file": file}) + "\n")
             (stage / FRAMES_INDEX).write_text("".join(lines), encoding="utf-8")
             for old in out.glob("frame-*.png"):
                 if FRAME_FILE.fullmatch(old.name):
@@ -242,8 +285,10 @@ def frames(
     except _video.MissingVideoExtraError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=2) from exc
+    except NoCropError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--profile") from exc
     except ValueError as exc:
-        raise typer.BadParameter(str(exc), param_hint="VIDEO") from exc
+        raise typer.BadParameter(str(exc), param_hint="INPUT") from exc
     except OSError as exc:  # e.g. --out is a file, not writable, or the disk is full
         typer.echo(f"cannot write frames to {out}: {exc}", err=True)
         raise typer.Exit(code=1) from exc

@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from framelift._internal.aggregate import Aggregator
 from framelift._internal.extract import Extractor
 from framelift._internal.items import item_keyer
+from framelift._internal.layout import Layout, NoCropError
 from framelift._internal.sources import (
     UnreadableInputError,
     error_reason,
@@ -59,6 +60,15 @@ class _Unreadable:
     def sha256(self) -> str | None:
         """None when the file itself could not be read."""
         return self.error.sha256
+
+
+@dataclass(frozen=True)
+class _Uncropped:
+    """A screen whose orientation has no box in `Profile.locate`, so it was not sent."""
+
+    path: Path
+    sha256: str | None
+    error: NoCropError
 
 
 @dataclass
@@ -125,6 +135,7 @@ class Pipeline[OutputT: BaseModel]:
         self.frame_rate = frame_rate
         self.motion_threshold = motion_threshold
         self._extractor = Extractor(profile, model, max_retries=max_retries)
+        self._layout = Layout.from_profile(profile)
 
     def run(self, inputs: str | Path | Iterable[str | Path]) -> RunResult:
         """Process the inputs in order.
@@ -177,7 +188,7 @@ class Pipeline[OutputT: BaseModel]:
 
     def _record(
         self,
-        image: ImageSource | _Unreadable,
+        image: ImageSource | _Unreadable | _Uncropped,
         writer: TextIO | None,
         aggregator: Aggregator | None,
         result: RunResult,
@@ -187,6 +198,16 @@ class Pipeline[OutputT: BaseModel]:
             error = image.error.without_path if self.anonymize_paths else str(image.error)
             observation = self._extractor.unreadable(
                 image.path, image.sha256, error, anonymize_paths=self.anonymize_paths
+            )
+            output = None
+        elif isinstance(image, _Uncropped):
+            # The message names no path, so it is the same with anonymized paths.
+            observation = self._extractor.unreadable(
+                image.path,
+                image.sha256,
+                str(image.error),
+                anonymize_paths=self.anonymize_paths,
+                crop=image.error.crop,
             )
             output = None
         else:
@@ -217,7 +238,9 @@ class Pipeline[OutputT: BaseModel]:
             with result.items_path.open("w", encoding="utf-8") as fh:
                 fh.writelines(item.to_json() + "\n" for item in result.items)
 
-    def _images(self, paths: list[Path]) -> Generator[ImageSource | _Unreadable, None, None]:
+    def _images(
+        self, paths: list[Path]
+    ) -> Generator[ImageSource | _Unreadable | _Uncropped, None, None]:
         for path in paths:
             # Only reading and decoding is guarded here; errors while extracting happen in the
             # caller, outside this generator, and are not mistaken for an unreadable input.
@@ -226,7 +249,10 @@ class Pipeline[OutputT: BaseModel]:
             kind = "video" if is_video(path) else "image"
             if kind == "image":
                 try:
-                    image = load_image(path)
+                    image = load_image(path, self._layout)
+                except NoCropError as exc:
+                    yield _Uncropped(path, exc.sha256, exc)
+                    continue
                 except UnreadableInputError as exc:
                     yield _Unreadable(exc)
                     continue
@@ -246,7 +272,14 @@ class Pipeline[OutputT: BaseModel]:
             try:
                 with closing(frames):
                     for frame in frames:
-                        yield frame_to_source(path, source_sha256, frame)
+                        # One frame without a crop box does not stop the video: a recording
+                        # may turn the screen, and the next frames can still be cropped.
+                        try:
+                            source = frame_to_source(path, source_sha256, frame, self._layout)
+                        except NoCropError as exc:
+                            yield _Uncropped(path, source_sha256, exc)
+                            continue
+                        yield source
             except UnreadableInputError as exc:
                 exc.sha256 = source_sha256
                 yield _Unreadable(exc)

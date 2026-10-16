@@ -18,7 +18,6 @@ Needs the ``video`` extra (PyAV).
 from __future__ import annotations
 
 import hashlib
-import io
 import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -27,6 +26,7 @@ import imagehash
 import numpy as np
 from PIL import Image
 
+from framelift._internal.layout import encode_png
 from framelift._internal.sources import ImageSource, UnreadableInputError, error_reason
 
 if TYPE_CHECKING:
@@ -34,6 +34,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from numpy.typing import NDArray
+
+    from framelift._internal.layout import Layout
 
 DEFAULT_FRAME_RATE = 4.0
 DEFAULT_MOTION_THRESHOLD = 0.05
@@ -364,18 +366,25 @@ def _to_sample(frame: Any, time: float) -> _Sample:
     return _Sample.of_gray(gray, time, lambda: upright(frame.to_image(), frame.rotation))
 
 
-def frame_to_source(path: Path, source_sha256: str, frame: VideoFrame) -> ImageSource:
-    """Encode a picked frame as PNG, ready to send to the model."""
-    buffer = io.BytesIO()
-    frame.image.save(buffer, format="PNG")
-    data = buffer.getvalue()
+def frame_to_source(
+    path: Path, source_sha256: str, frame: VideoFrame, layout: Layout
+) -> ImageSource:
+    """Redact and crop a picked frame with ``layout`` and encode it as PNG, ready to send.
+
+    Raises `NoCropError` when ``layout`` has no crop box for the frame's orientation.
+    """
+    view, crop = layout.apply(frame.image)
+    data = encode_png(view)
     return ImageSource(
         path=path,
         data=data,
         media_type="image/png",
         sha256=hashlib.sha256(data).hexdigest(),
-        phash=frame.phash,
+        # The picked frame's hash describes the whole screen; the record is of what was sent.
+        phash=frame.phash if layout.is_identity else str(imagehash.phash(view)),
         source_sha256=source_sha256,
+        crop=crop,
+        view=view,
         frame_index=frame.index,
         timestamp_ms=frame.timestamp_ms,
     )

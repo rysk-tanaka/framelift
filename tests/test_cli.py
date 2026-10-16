@@ -5,7 +5,9 @@ import re
 import sys
 from pathlib import Path
 
+import imagehash
 import pytest
+from PIL import Image
 from typer.testing import CliRunner
 
 from framelift import Observation
@@ -146,7 +148,8 @@ def test_a_profile_that_fails_on_import_is_a_usage_error(
         "from framelift import Profile\n"
         "class Out(BaseModel):\n"
         "    value: int\n"
-        "profile = Profile(name='p', output_type=Out, instructions='read', item_key=len)\n"
+        "profile = Profile(locate='full', name='p', output_type=Out, instructions='read',\n"
+        "                  item_key=len)\n"
     )
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(
@@ -167,7 +170,7 @@ def test_frames_writes_the_picked_frames(scrolling_video, tmp_path: Path) -> Non
     records = [json.loads(line) for line in (out / "frames.jsonl").read_text().splitlines()]
     assert len(records) == len(sample.holds)
     assert all((out / record["file"]).is_file() for record in records)
-    assert set(records[0]) == {"index", "timestamp_ms", "phash", "sharpness", "file"}
+    assert set(records[0]) == {"index", "timestamp_ms", "phash", "sharpness", "file", "crop"}
 
 
 def test_frames_reports_an_output_it_cannot_write(scrolling_video, tmp_path: Path) -> None:
@@ -180,6 +183,27 @@ def test_frames_reports_an_output_it_cannot_write(scrolling_video, tmp_path: Pat
     assert result.exit_code == 1
     assert "cannot write frames" in result.output
     assert "Traceback" not in result.output
+
+
+def test_frames_blames_the_input_for_an_image_it_cannot_read(
+    samples, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, truths = samples
+    unreadable = root / truths[0].file
+    read_bytes = Path.read_bytes
+
+    def denied(self: Path) -> bytes:
+        if self == unreadable:
+            raise PermissionError(13, "Permission denied", str(self))
+        return read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", denied)
+
+    result = runner.invoke(app, ["frames", str(unreadable), "--out", str(tmp_path / "out")])
+
+    assert result.exit_code == 2
+    assert "Invalid value for INPUT" in _plain(result.output)
+    assert "cannot write frames" not in result.output
 
 
 def test_frames_rejects_unreadable_videos_without_touching_earlier_output(
@@ -347,7 +371,8 @@ def test_run_says_why_items_were_skipped(
         "from framelift import Profile\n"
         "def key(item):\n"
         "    raise KeyError(item.name)\n"
-        "profile = Profile(name='p', output_type=ShopScreen, instructions='read', item_key=key)\n"
+        "profile = Profile(locate='full', name='p', output_type=ShopScreen, instructions='read',\n"
+        "                  item_key=key)\n"
     )
     monkeypatch.chdir(tmp_path)
     monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1]))
@@ -381,7 +406,7 @@ def test_an_import_error_from_profile_code_is_not_a_usage_error(
         "    value: int\n"
         "def needs_a_module(out):\n"
         "    raise ImportError('a module the validator needs')\n"
-        "profile = Profile(name='p', output_type=Out, instructions='read',\n"
+        "profile = Profile(locate='full', name='p', output_type=Out, instructions='read',\n"
         "                  validators=[needs_a_module])\n"
     )
     monkeypatch.chdir(tmp_path)
@@ -404,3 +429,89 @@ def test_an_import_error_from_profile_code_is_not_a_usage_error(
     assert result.exit_code == 1
     assert isinstance(result.exception, ImportError)
     assert "a module the validator needs" in str(result.exception)
+
+
+def test_frames_writes_a_still_image_as_one_frame(samples, tmp_path: Path) -> None:
+    root, truths = samples
+    out = tmp_path / "frames"
+
+    result = runner.invoke(app, ["frames", str(root / truths[0].file), "--out", str(out)])
+
+    assert result.exit_code == 0, result.output
+    (record,) = [json.loads(line) for line in (out / "frames.jsonl").read_text().splitlines()]
+    assert record["file"] == "frame-0000.png" and record["timestamp_ms"] is None
+    assert record["crop"] == {
+        "orientation": "portrait",
+        "size": [720, 1280],
+        "bbox": [0.0, 0.0, 1.0, 1.0],
+        "redact": [],
+    }
+    with Image.open(out / "frame-0000.png") as image:
+        assert image.size == (720, 1280)
+
+
+def test_frames_with_a_profile_writes_what_would_be_sent(
+    samples, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(Path(__file__).resolve().parents[1])
+    root, truths = samples
+    out = tmp_path / "frames"
+
+    result = runner.invoke(
+        app,
+        [
+            "frames",
+            str(root / truths[1].file),  # landscape
+            "--profile",
+            "examples.fantasy_shop:profile",
+            "--out",
+            str(out),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    (record,) = [json.loads(line) for line in (out / "frames.jsonl").read_text().splitlines()]
+    assert record["crop"]["bbox"] == [0.0, 0.0, 1.0, 0.9]
+    with Image.open(out / "frame-0000.png") as image:
+        assert image.size == (1280, 648)
+
+
+def test_frames_of_a_video_with_a_profile_record_the_hash_of_what_would_be_sent(
+    scrolling_video, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(Path(__file__).resolve().parents[1])
+    path, _ = scrolling_video
+    out = tmp_path / "frames"
+
+    result = runner.invoke(
+        app, ["frames", str(path), "--profile", "examples.fantasy_shop:profile", "--out", str(out)]
+    )
+
+    assert result.exit_code == 0, result.output
+    records = [json.loads(line) for line in (out / "frames.jsonl").read_text().splitlines()]
+    assert records
+    for record in records:
+        with Image.open(out / record["file"]) as image:
+            assert image.size == (1280, 648)
+            assert record["phash"] == str(imagehash.phash(image))
+
+
+def test_frames_reports_a_screen_the_profile_cannot_crop(
+    samples, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "portrait_only.py").write_text(
+        "from dataclasses import replace\n"
+        "from examples.fantasy_shop import profile as shop\n"
+        "profile = replace(shop, locate={'portrait': (0.0, 0.0, 1.0, 0.6)})\n"
+    )
+    monkeypatch.chdir(Path(__file__).resolve().parents[1])
+    monkeypatch.syspath_prepend(str(tmp_path))
+    root, truths = samples
+
+    result = runner.invoke(
+        app,
+        ["frames", str(root / truths[1].file), "--profile", "portrait_only:profile"],
+    )
+
+    assert result.exit_code == 2
+    assert "no crop box for landscape" in _plain(result.output)

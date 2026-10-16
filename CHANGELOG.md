@@ -5,6 +5,22 @@ All notable changes to this project are documented here. This project follows
 
 ## [Unreleased]
 
+### Added
+
+- `Profile.locate` and `Profile.redact`: send only a box of each screen orientation, with areas
+  painted black first; boxes are fractions of the upright screen (display rotation for videos,
+  EXIF orientation for images)
+- `crop` in observations, recording the orientation, the screen size in pixels, the box cropped
+  and the areas redacted
+- `framelift frames --profile` writes the images a run would send, and `frames` accepts images
+- Evaluation crops and redacts like a run
+
+### Changed
+
+- Breaking: `Profile.locate` is required; pass `locate="full"` to keep sending the whole screen
+- Breaking: observations are `framelift/observation/v3` (adds `crop`)
+- A screen whose orientation has no crop box is recorded as an error observation and not sent
+
 ## [0.2.0] - 2026-10-17
 
 ### Added

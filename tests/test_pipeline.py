@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import sys
 from collections.abc import Iterator
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
 import pytest
+from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic_ai.messages import (
     BinaryContent,
@@ -18,11 +20,14 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
-from examples.fantasy_shop import profile as shop_profile
+from examples.fantasy_shop import profile as fantasy_shop_profile
 from framelift import Item, Observation, Pipeline, Profile
 from framelift import pipeline as pipeline_module
 from framelift._internal import video as video_module
 from framelift.observation import FrameRef
+
+# Most tests look up the answer by the hash of the input image, so the screen is sent whole.
+shop_profile = replace(fantasy_shop_profile, locate="full")
 
 
 def _frame(observation: Observation) -> FrameRef:
@@ -73,7 +78,7 @@ def test_run_reads_every_image_and_writes_jsonl(samples, tmp_path: Path) -> None
     assert first.profile.name == "fantasy-shop"
     assert first.model == "function:fake"
     assert first.retries == 0
-    assert '"schema":"framelift/observation/v2"' in lines[0]
+    assert '"schema":"framelift/observation/v3"' in lines[0]
     # An image is its own single frame.
     assert _frame(first).index == 0 and _frame(first).timestamp_ms is None
     assert _frame(first).sha256 == first.source.sha256
@@ -142,7 +147,7 @@ class Aliased(BaseModel):
 
 def test_observations_keep_the_models_own_serialization(samples) -> None:
     root, truths = samples
-    profile = Profile(name="p", output_type=Aliased, instructions="read")
+    profile = Profile(locate="full", name="p", output_type=Aliased, instructions="read")
 
     def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         return ModelResponse(parts=[ToolCallPart(info.output_tools[0].name, {"shopName": "A"})])
@@ -233,7 +238,7 @@ def test_invalid_settings_are_rejected() -> None:
 
 def test_profiles_without_item_key_write_no_items(samples, tmp_path: Path) -> None:
     root, _ = samples
-    profile = Profile(name="p", output_type=Aliased, instructions="read")
+    profile = Profile(locate="full", name="p", output_type=Aliased, instructions="read")
 
     def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         return ModelResponse(parts=[ToolCallPart(info.output_tools[0].name, {"shopName": "A"})])
@@ -282,10 +287,10 @@ def test_inputs_that_cannot_be_read_from_disk_are_recorded(
     locked_image, good = root / truths[0].file, root / truths[1].file
     real_load_image, real_hash_file = pipeline_module.load_image, pipeline_module.hash_file
 
-    def load_image(path: Path) -> Any:
+    def load_image(path: Path, layout: Any) -> Any:
         if path == locked_image:
             raise PermissionError(f"Permission denied: {path}")
-        return real_load_image(path)
+        return real_load_image(path, layout)
 
     def hash_file(path: Path) -> str:
         if path == video_path:
@@ -437,3 +442,96 @@ def test_a_video_is_closed_when_an_error_stops_the_run(scrolling_video, monkeypa
         Pipeline(shop_profile, model=FunctionModel(refuses)).run(path)
 
     assert closed == [True]
+
+
+def _sent_images(model_calls: list[Image.Image]):
+    """A model that keeps every image it is sent and gives a fixed valid answer."""
+
+    def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        for message in messages:
+            for part in getattr(message, "parts", ()):
+                if isinstance(part, UserPromptPart) and not isinstance(part.content, str):
+                    for item in part.content:
+                        if isinstance(item, BinaryContent):
+                            model_calls.append(Image.open(io.BytesIO(item.data)).convert("RGB"))
+        return _fixed_answer(messages, info)
+
+    return FunctionModel(respond)
+
+
+def test_the_sent_image_is_redacted_and_cropped(samples) -> None:
+    root, truths = samples
+    profile = replace(fantasy_shop_profile, redact={"portrait": [(0.0, 0.0, 1.0, 0.05)]})
+    sent: list[Image.Image] = []
+
+    result = Pipeline(profile, model=_sent_images(sent)).run(root / truths[0].file)  # portrait
+
+    (observation,) = result.observations
+    assert observation.crop is not None
+    assert observation.crop.orientation == "portrait"
+    assert observation.crop.bbox == (0.0, 0.0, 1.0, 0.6)
+    assert observation.crop.size == (720, 1280)
+    assert observation.crop.redact == [(0.0, 0.0, 1.0, 0.05)]
+    (image,) = sent
+    assert image.size == (720, 768)  # 60% of 1280
+    assert image.getpixel((360, 10)) == (0, 0, 0)  # the redacted top 5%
+    assert _frame(observation).sha256 != observation.source.sha256
+
+
+def test_the_example_crop_keeps_every_row_of_the_synthetic_screens(samples) -> None:
+    root, truths = samples
+    sent: list[Image.Image] = []
+
+    Pipeline(fantasy_shop_profile, model=_sent_images(sent)).run(root)
+
+    # The crop must not cut a row: the bottom of the sent image is the plain background.
+    for image, truth in zip(sent, truths, strict=True):
+        width, height = image.size
+        last_row_bottom = 150 + (len(truth.items) - 1) * 84 + 72
+        assert last_row_bottom < height
+        assert image.getpixel((width // 2, height - 1)) == (34, 30, 46)
+
+
+def test_a_screen_without_a_crop_box_is_an_error_and_the_run_goes_on(samples) -> None:
+    root, _ = samples  # shop-000 and shop-002 are portrait, shop-001 landscape
+    profile = replace(fantasy_shop_profile, locate={"portrait": (0.0, 0.0, 1.0, 0.6)})
+    sent: list[Image.Image] = []
+
+    result = Pipeline(profile, model=_sent_images(sent), anonymize_paths=True).run(root)
+
+    assert [o.status for o in result.observations] == ["ok", "error", "ok"]
+    skipped = result.observations[1]
+    assert skipped.frame is None
+    assert skipped.crop is not None
+    assert skipped.crop.orientation == "landscape" and skipped.crop.bbox is None
+    assert skipped.crop.size == (1280, 720)
+    assert skipped.source.sha256 is not None
+    assert skipped.error == "Profile.locate has no crop box for landscape screens"
+    assert len(sent) == 2
+
+
+def test_video_frames_are_cropped(scrolling_video) -> None:
+    path, sample = scrolling_video
+    sent: list[Image.Image] = []
+
+    result = Pipeline(fantasy_shop_profile, model=_sent_images(sent)).run(path)
+
+    assert len(result.succeeded) == len(sample.holds)
+    assert all(image.size == (1280, 648) for image in sent)  # 90% of 720, above the footer
+    assert all(_frame(o).index == i for i, o in enumerate(result.observations))
+
+
+def test_video_frames_without_a_crop_box_are_errors_and_the_video_goes_on(scrolling_video) -> None:
+    path, sample = scrolling_video  # landscape
+    profile = replace(fantasy_shop_profile, locate={"portrait": (0.0, 0.0, 1.0, 0.6)})
+    sent: list[Image.Image] = []
+
+    result = Pipeline(profile, model=_sent_images(sent)).run(path)
+
+    assert len(result.observations) == len(sample.holds)
+    assert all(o.status == "error" and o.frame is None for o in result.observations)
+    assert all(o.crop is not None and o.crop.bbox is None for o in result.observations)
+    assert {o.crop.orientation for o in result.observations if o.crop} == {"landscape"}
+    video_sha = hashlib.sha256(path.read_bytes()).hexdigest()
+    assert all(o.source.sha256 == video_sha for o in result.observations)
+    assert sent == []
