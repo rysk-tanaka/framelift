@@ -146,4 +146,4 @@ Renovate で uv（`uv.lock`）と GitHub Actions の依存を更新する（GitH
 
 - ty はベータで、更新で診断が変わりうるため、`pyproject.toml` でバージョンを固定し、個別の PR で確認してから上げる
 - `pydantic-ai-slim` と `pydantic-evals` は 1 本の PR にまとめる
-- pre-commit のフックは `uv run` で uv.lock のバージョンを使うので、フック側のバージョン管理は不要
+- pre-commit のフック（`pre-commit/pre-commit-hooks`）の `rev` も Renovate で更新する（`:enablePreCommit`）
