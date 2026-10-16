@@ -1,0 +1,12 @@
+{
+  "config": {
+    "MD013": false,
+    "MD024": false,
+    "MD033": false,
+    "MD162": false,
+  },
+  "ignores": [
+    "**/node_modules/**",
+    ".tmp/**",
+  ],
+}

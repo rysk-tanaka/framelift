@@ -1,0 +1,21 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended", "helpers:pinGitHubActionDigests"],
+  "lockFileMaintenance": { "enabled": true },
+  "packageRules": [
+    {
+      "description": "ty is beta: diagnostics can change between releases, so review each update on its own",
+      "matchPackageNames": ["ty"],
+      "automerge": false
+    },
+    {
+      "description": "Keep Pydantic AI packages in lockstep",
+      "matchPackageNames": ["pydantic-ai-slim", "pydantic-evals"],
+      "groupName": "pydantic-ai"
+    },
+    {
+      "matchManagers": ["github-actions"],
+      "groupName": "github-actions"
+    }
+  ]
+}

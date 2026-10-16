@@ -1,0 +1,88 @@
+[project]
+name = "framelift"
+version = "0.1.0"
+description = "Extract structured data from screen recordings and screenshots with vision LLMs."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "rysk-tanaka" }]
+requires-python = ">=3.12"
+keywords = ["screenshot", "screen-recording", "vision", "llm", "structured-output", "pydantic-ai"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Multimedia :: Graphics",
+    "Topic :: Scientific/Engineering :: Image Recognition",
+    "Typing :: Typed",
+]
+dependencies = [
+    "imagehash>=4.3",
+    "pillow>=12",
+    "pydantic>=2.14",
+    "pydantic-ai-slim>=2.57",
+    "typer>=0.27",
+]
+
+[project.optional-dependencies]
+video = ["av>=19"]
+eval = ["pydantic-evals>=2.57"]
+anthropic = ["pydantic-ai-slim[anthropic]>=2.57"]
+openai = ["pydantic-ai-slim[openai]>=2.57"]
+google = ["pydantic-ai-slim[google]>=2.57"]
+
+[project.scripts]
+framelift = "framelift.cli:app"
+
+[project.urls]
+Repository = "https://github.com/rysk-tanaka/framelift"
+Issues = "https://github.com/rysk-tanaka/framelift/issues"
+Changelog = "https://github.com/rysk-tanaka/framelift/blob/main/CHANGELOG.md"
+
+[build-system]
+requires = ["uv_build>=0.11.32,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1",
+    "ruff==0.17.1",
+    "ty==0.0.88",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes
+    "I",        # isort
+    "B",        # flake8-bugbear
+    "UP",       # pyupgrade
+    "SIM",      # flake8-simplify
+    "RUF",      # ruff-specific
+    "PTH",      # use pathlib
+    "TC",       # type-checking imports
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["TC"]
+
+[tool.ty.environment]
+python-version = "3.12"
+
+[tool.ty.rules]
+unused-ignore-comment = "warn"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = ["-ra", "--strict-markers", "-m", "not live"]
+markers = [
+    "live: calls a real model provider (needs API keys; not run in CI)",
+]

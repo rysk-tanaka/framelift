@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# framelift outputs and caches
+out/
+.framelift-cache/
+
+# Images and videos are not tracked, except curated samples and docs assets.
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.gif
+*.bmp
+*.mp4
+*.mov
+*.mkv
+*.webm
+!samples/**
+!docs/assets/**
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
