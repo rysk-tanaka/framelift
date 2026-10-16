@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel
 from pydantic_ai import Agent, AgentRetries, BinaryContent, capture_run_messages
@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from pydantic_ai.models import Model
 
     from framelift._internal.sources import ImageSource
-    from framelift.observation import Crop
+    from framelift.observation import Crop, Screen
     from framelift.profile import Profile, Validator
 
 USER_PROMPT = "Extract the data shown in this screenshot."
@@ -117,15 +117,16 @@ class Extractor[OutputT: BaseModel]:
         return _extraction(result.output, None, usage, messages, started)
 
     def observe(
-        self, image: ImageSource, *, anonymize_paths: bool = False
+        self, image: ImageSource, *, anonymize_paths: bool = False, screen: Screen | None = None
     ) -> tuple[Observation, OutputT | None]:
         """Extract one image into an `Observation`; a failed extraction becomes an error record.
 
         Also returns the validated output (``None`` on error), so callers that need the model,
-        such as evaluation, do not have to validate the stored JSON again.
+        such as evaluation, do not have to validate the stored JSON again. ``screen`` is the
+        screen check that let the image through, if one was asked.
         """
         extraction = self.extract(image)
-        return self._observation(image, extraction, anonymize_paths), extraction.output
+        return self._observation(image, extraction, anonymize_paths, screen), extraction.output
 
     async def observe_async(
         self, image: ImageSource, *, anonymize_paths: bool = False
@@ -151,6 +152,7 @@ class Extractor[OutputT: BaseModel]:
             source=SourceRef(path=None if anonymize_paths else path.as_posix(), sha256=sha256),
             frame=None,
             crop=crop,
+            screen=None,
             data=None,
             error=error,
             model=model_label(self._model),
@@ -158,12 +160,39 @@ class Extractor[OutputT: BaseModel]:
             retries=0,
         )
 
+    def screened_out(
+        self, image: ImageSource, screen: Screen, *, anonymize_paths: bool = False
+    ) -> Observation:
+        """The record of an image not extracted because of its screen check: skipped when the
+        check found another screen, an error when the check itself failed."""
+        return self._observation(
+            image,
+            Extraction(
+                output=None,
+                error=None if screen.error is None else f"Screen check failed: {screen.error}",
+                input_tokens=0,
+                output_tokens=0,
+                requests=0,
+                retries=0,
+                latency_ms=0,
+            ),
+            anonymize_paths,
+            screen,
+            status="error" if screen.error is not None else "skipped",
+        )
+
     def _observation(
-        self, image: ImageSource, extraction: Extraction[OutputT], anonymize_paths: bool
+        self,
+        image: ImageSource,
+        extraction: Extraction[OutputT],
+        anonymize_paths: bool,
+        screen: Screen | None = None,
+        *,
+        status: Literal["skipped", "error"] | None = None,
     ) -> Observation:
         output = extraction.output
         return Observation(
-            status="ok" if output is not None else "error",
+            status=status or ("ok" if output is not None else "error"),
             profile=ProfileRef(name=self._profile.name, version=self._profile.version),
             source=SourceRef(
                 path=None if anonymize_paths else image.path.as_posix(),
@@ -176,6 +205,7 @@ class Extractor[OutputT: BaseModel]:
                 phash=image.phash,
             ),
             crop=image.crop,
+            screen=screen,
             data=None if output is None else output.model_dump(mode="json"),
             error=extraction.error,
             model=model_label(self._model),

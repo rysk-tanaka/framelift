@@ -50,7 +50,10 @@ Pipeline.run(inputs)
     動画: sample_video で一定間隔の標本を取り、縮小画像のタイルのうち変化した割合で静止区間に分け、区間ごとに最も鮮明な 1 枚に Layout を適用して PNG にする（frame_to_source）
     Layout: EXIF の向きと色空間を正規化し、redact を黒く塗ってから locate の範囲で切り出す。向きに合う範囲がなければ NoCropError（error の観測にして次へ進む）
     full かつ redact なしの静止画だけは、元のバイト列をそのまま送る
-  → Extractor.observe: Pydantic AI の Agent に output_type と画像（BinaryContent）を渡し、Observation（v3。source・frame・crop）を作る
+  → Profile.screen_description があれば ScreenClassifier.classify: 送る画像（ImageSource.view）を長辺 512px に縮小した PNG で対象画面か判定する
+      出力ツール名は screen_check（抽出の final_result と見分けるため）。モデルは screen_model（省略時は model）
+      対象外なら status: "skipped"、判定の失敗なら status: "error" の観測にして抽出しない。判定の結果と usage は観測の screen に残す
+  → Extractor.observe: Pydantic AI の Agent に output_type と画像（BinaryContent）を渡し、Observation（v3。source・frame・crop・screen）を作る
       Profile.validators を output_validator に登録し、ModelRetry で再試行
       再試行を使い切ったら status: "error"。1 枚の失敗で全体は止めない
       読めない画像・動画（途中で壊れた動画、フレームのない動画を含む）は status: "error"、frame: null の観測にして次へ進む
@@ -67,8 +70,8 @@ framelift eval（framelift[eval] が必要）
       ケースや評価器が異常終了したら終了コード 1。スコアが低いだけなら 0
 ```
 
-- `src/framelift/profile.py` — `Profile`（`name`・`version`・`output_type`・`instructions`・`validators`・`locate`・`redact`・`item_key`）と `Validator`・`Box`・`Orientation` 型。`locate` は必須で、`redact` は向きごとの dict に正規化して持つ。`fingerprint` は結果に影響する項目のハッシュ。`item_field` は `item_key` を適用する一覧フィールド（トップレベルでただ 1 つの `list[モデル]`。`| None` も可）を返す
-- `src/framelift/pipeline.py` — `Pipeline` と `RunResult`
+- `src/framelift/profile.py` — `Profile`（`name`・`version`・`output_type`・`instructions`・`validators`・`locate`・`redact`・`screen_description`・`item_key`）と `Validator`・`Box`・`Orientation` 型。`locate` は必須で、`redact` は向きごとの dict に正規化して持つ。`fingerprint` は結果に影響する項目のハッシュで、読む画像を選ぶだけの `screen_description` は入れない。`item_field` は `item_key` を適用する一覧フィールド（トップレベルでただ 1 つの `list[モデル]`。`| None` も可）を返す
+- `src/framelift/pipeline.py` — `Pipeline` と `RunResult`（`succeeded`・`skipped`・`failed`）
 - `src/framelift/observation.py` — 出力レコード（`framelift/observation/v3`）。v3 は 0.3.0 で初めてリリースするので、0.3 の間は v3 に項目を足しても版を上げない。`schema` は Python 側では `schema_id`（alias で `schema` として出力）
 - `src/framelift/item.py` — 集約後のレコード `Item`（`framelift/item/v1`）
 - `src/framelift/cli.py` — Typer の CLI（`run`・`eval`・`frames`・`synth`）。`frames` は静止画も受け付け、`--profile` で送る画像を確かめられる。`eval` は pydantic-evals を遅延 import する。`--profile` は `package.module:attribute` 形式で、カレントディレクトリを `sys.path` に追加して読み込む
@@ -76,6 +79,7 @@ framelift eval（framelift[eval] が必要）
   - `sources.py` — 入力の展開、画像の読み込み、ファイルの sha256
   - `video.py` — 動画の標本取り、静止区間の判定、代表フレームの選択（PyAV を遅延 import する）
   - `layout.py` — 送る画像を作る（EXIF の向きと色空間の正規化、塗りつぶし、切り出し）。`NoCropError`
+  - `screen.py` — 画面判定（`ScreenClassifier`・`ScreenCheck`・`screen_image`）
   - `items.py` — `item_key` による項目のキー計算と dump。評価と集約で共有する
   - `aggregate.py` — 複数フレームの項目の多数決と `Item` の組み立て
   - `extract.py` — Pydantic AI による抽出と Observation の組み立て
@@ -98,7 +102,7 @@ framelift eval（framelift[eval] が必要）
 
 設計の詳細と判断の理由は [docs/README.md](docs/README.md) から辿れる。
 
-- 0.3 — 切り出し（`full`・`fixed`）と塗りつぶし（実装済み）、画面判定、抽出結果のキャッシュ。総当たり比較と切り出しの `model` 戦略は要望が出てから
+- 0.3 — 切り出し（`full`・`fixed`）と塗りつぶし、画面判定（実装済み）、抽出結果のキャッシュ。総当たり比較と切り出しの `model` 戦略は要望が出てから
 - 1.0 — 公開 API の確定
 
 ## コーディング規約

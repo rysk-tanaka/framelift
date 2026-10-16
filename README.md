@@ -18,6 +18,7 @@ framelift turns screenshots and screen recordings into validated, provenance-tag
 - Model-agnostic: pass any `provider:model` string supported by Pydantic AI
 - Only the part of the screen you choose is sent: crop each orientation to a box and paint over
   areas such as a chat window before anything leaves your machine
+- An optional screen check: images of other screens are skipped before extraction
 - `observations.jsonl` output with source, frame, crop, usage and retry information per image or
   frame
 - `items.jsonl`: list items seen in several frames merged by majority vote, with disagreements kept
@@ -25,7 +26,7 @@ framelift turns screenshots and screen recordings into validated, provenance-tag
   and a model against images with expected outputs
 - A synthetic sample generator (a fictional shop screen, still or scrolling) for demos and tests
 
-Planned for 0.3: screen classification and caching.
+Planned for 0.3: caching.
 
 ## Install
 
@@ -83,6 +84,7 @@ Each line of `out/observations.jsonl` is one image or video frame:
  "source": {"path": "samples/shop-scroll-000.mp4", "sha256": "…"},
  "frame": {"index": 1, "timestamp_ms": 3000, "sha256": "…", "phash": "…"},
  "crop": {"orientation": "landscape", "size": [1280, 720], "bbox": [0.0, 0.0, 1.0, 0.9], "redact": []},
+ "screen": null,
  "data": {"shop_name": "…", "items": [{"name": "…", "price": 120}]},
  "error": null,
  "model": "anthropic:<model-name>",
@@ -131,6 +133,23 @@ and every field the frames disagreed on is listed in `conflicts`. Items are writ
 output model serializes them, as in `observations.jsonl`. If a model error stops the run, the
 items read until then are still written before the error is raised. `Item.data` is plain JSON,
 not validated against the output model, so a required field can be null after a tie.
+
+## Screen check
+
+A recording often passes through screens you do not want read, such as menus or loading screens.
+Describe the target screen, and each image is first checked against it:
+
+```python
+shop = Profile(..., screen_description="a shop's item list with prices")
+Pipeline(shop, model="anthropic:<model-name>", screen_model="anthropic:<smaller-model>")
+```
+
+The check is sent the same cropped and redacted image as the extraction, shrunk to 512 pixels on
+its longest side. An image of another screen is recorded with `"status": "skipped"` and is not
+extracted; one the check cannot answer is an error. The check's answer and its token usage are in
+the observation's `screen`, apart from the extraction's `usage`. `screen_model` (`--screen-model`
+on the command line) defaults to the extraction model. Evaluation does not check screens: its
+cases are all target screens.
 
 ## Evaluate
 

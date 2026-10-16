@@ -8,7 +8,7 @@ framelift は、画面収録やスクリーンショットから、利用者が�
 
 ## 使い方のイメージ
 
-1.0 時点の完成形のイメージ。今使えるのは `name`・`version`・`output_type`・`instructions`・`validators`・`item_key`・`locate`・`redact` と、画像・動画の入力までで、それ以外の引数はコメントの版で足す。
+1.0 時点の完成形のイメージ。今使えるのは `name`・`version`・`output_type`・`instructions`・`validators`・`item_key`・`locate`・`redact`・`screen_description` と、画像・動画の入力までで、それ以外の引数はコメントの版で足す。
 
 ```python
 from pydantic import BaseModel, Field
@@ -70,15 +70,15 @@ framelift run recording.mp4 --profile myprofiles:shop --model anthropic:<model> 
 graph LR
     S[Source<br/>画像・動画] --> SM[Sampler<br/>一定間隔で抽出]
     SM --> DD[Deduper<br/>静止区間で区切り<br/>最も鮮明な1枚]
-    DD --> CL[Classifier<br/>対象画面か]
-    CL --> LO[Locator<br/>切り出し・マスク]
-    LO --> EX[Extractor<br/>構造化抽出・再試行]
+    DD --> LO[Locator<br/>切り出し・マスク]
+    LO --> CL[Classifier<br/>対象画面か]
+    CL --> EX[Extractor<br/>構造化抽出・再試行]
     EX --> AG[Aggregator<br/>item_keyで多数決]
     EX --> OB[(observations.jsonl)]
     AG --> IT[(items.jsonl)]
 ```
 
-実装済みなのは Source（画像・動画）、Sampler、Deduper、Locator（`full`・`fixed`）、Extractor、Aggregator と、`observations.jsonl`・`items.jsonl` の書き出し。
+実装済みなのは Source（画像・動画）、Sampler、Deduper、Locator（`full`・`fixed`）、Classifier、Extractor、Aggregator と、`observations.jsonl`・`items.jsonl` の書き出し。
 
 #### 入力
 
@@ -101,7 +101,17 @@ graph LR
 
 #### 画面判定
 
-`screen_description` をもとに、縮小した画像で「対象画面かどうか（bool）と確信度」を軽いモデルに返させる。判定結果は pHash をキーにキャッシュする。テンプレート照合など、LLM を使わない判定関数に置き換えることもできる。
+`Profile.screen_description` があるとき、抽出の前に、送る画像が対象画面かどうか（bool）と確信度をモデルに返させる。対象でない画面は抽出に回さない。
+
+- 判定には、切り出し・塗りつぶし後の画像を長辺 512px 以下に縮小した PNG を送る。判定に細部は要らず、トークンを抑えられるため。切り出す前の画面全体を送ると、切り出しで外した領域まで外部に送ることになるので、図の順のとおり、切り出しの後に判定する
+- 元のバイト列をそのまま送る静止画でも、判定には EXIF の向きと色空間を正規化した画像を使う。元の JPEG のままでは、横倒しの画像が判定に送られ、CMYK の画像は PNG に保存できないため
+- 判定のモデルは `Pipeline(screen_model=...)`（CLI は `run --screen-model`）で分けられ、省略すると抽出と同じモデルを使う。判定の出力ツールには `screen_check` という名前を付け、抽出（既定の `final_result`）と見分けられるようにする
+- 対象でないと判定した画像は `status: "skipped"` の観測にする。`skipped` は失敗ではないので、終了コードは変えない。集約は `ok` の観測だけを使うので、票にもならない
+- 再試行しても判定の応答が検証を通らなかった画像は、推測で抽出せず `status: "error"` にする
+- 判定のトークンは抽出の `usage` と分けて、観測の `screen.usage` に残す。判定に失敗した場合も残すので、判定にかかったコストが見える
+- `screen_description` は、どの画像を読むかを決めるだけで、読み取る内容には影響しないので、`Profile.fingerprint` に入れない
+- 評価では判定をしない。データセットのケースは対象画面だけで、評価は抽出の精度を測るため
+- テンプレート照合など、LLM を使わない判定関数への差し替えは、要望が出てから入れる
 
 #### 切り出しと塗りつぶし
 
@@ -149,7 +159,7 @@ Pydantic AI の `Agent` に、`output_type` と切り出した画像（`BinaryCo
 
 スキーマにはバージョンを付ける。形式を変えるときは版（`v1` の部分）を上げる。
 
-`observations.jsonl`（画像・フレーム単位）は `framelift/observation/v3`。0.2 の v2 では、`source.phash` を、モデルに送った画像を表す `frame` に移した。0.3 の v3 では、送った画像をどう切り出したかを表す `crop` を足した。
+`observations.jsonl`（画像・フレーム単位）は `framelift/observation/v3`。0.2 の v2 では、`source.phash` を、モデルに送った画像を表す `frame` に移した。0.3 の v3 では、送った画像をどう切り出したかを表す `crop` と、画面判定の結果を表す `screen` を足し、`status` に `skipped` を加えた。
 
 ```jsonc
 {"schema": "framelift/observation/v3",
@@ -158,6 +168,8 @@ Pydantic AI の `Agent` に、`output_type` と切り出した画像（`BinaryCo
  "source": {"path": "recording.mp4", "sha256": "..."},
  "frame": {"index": 3, "timestamp_ms": 2250, "sha256": "...", "phash": "..."},
  "crop": {"orientation": "portrait", "size": [1170, 2532], "bbox": [0.0, 0.1, 1.0, 0.85], "redact": [[0.0, 0.85, 1.0, 1.0]]},
+ "screen": {"is_target": true, "confidence": 0.93, "model": "anthropic:<model>",
+            "usage": {"input_tokens": 410, "output_tokens": 24, "requests": 1, "latency_ms": 640}, "error": null},
  "data": {"shop_name": "...", "items": [...]},
  "error": null,
  "model": "anthropic:<model>",
@@ -170,9 +182,11 @@ Pydantic AI の `Agent` に、`output_type` と切り出した画像（`BinaryCo
 - `timestamp_ms` はストリームの先頭からの時間。開始時刻が 0 でない mov・mkv・webm でも、最初のフレームが 0 近くになる
 - 静止画では `index: 0`、`timestamp_ms: null`。`full` で塗りつぶしもなく、元のバイト列をそのまま送ったときだけ、`frame.sha256` は `source.sha256` と同じになる
 - `crop` の `size` は、表示どおりの向きにした画面の切り出す前の寸法（ピクセル）。`bbox` は切り出した範囲で、`full` なら `[0, 0, 1, 1]`。`redact` は実際に塗りつぶした領域
+- `screen` は画面判定の結果で、`screen_description` がないとき、または何も送らなかったときは null。判定に失敗したときは `is_target` と `confidence` が null で、`error` に理由が入る
+- `status` は `ok`・`skipped`（判定で対象外とした）・`error` のどれか。`skipped` では `data` と `error` が null で、抽出の `usage` は 0
 - 入力そのものを読めなかったときは、何も送っていないので `frame` と `crop` は null。向きに合う切り出し範囲がなかったときは、`frame` は null で、`crop` には `orientation` だけを入れ、`bbox` を null にする
 
-v3 は 0.3.0 で初めてリリースする。0.3 の画面判定とキャッシュも v3 に項目を足すが、v3 を書くリリースがまだないので、そのたびに版は上げない。
+v3 は 0.3.0 で初めてリリースする。0.3 の画面判定（`screen`・`skipped`）とキャッシュも v3 に項目を足すが、v3 を書くリリースがまだないので、そのたびに版は上げない。
 
 `items.jsonl`（集約後）は 0.2 で入れた。`Profile.item_key` があるときだけ書く。
 
@@ -196,7 +210,7 @@ v3 は 0.3.0 で初めてリリースする。0.3 の画面判定とキャッシ
 - データセット — YAML で書く。各ケースは、画像（データセットのルートからの相対パス）、sha256、正解（必須フィールドはすべて書く。既定値のあるフィールドは省いてよい）、メタデータ（画面の向き・端末・解像度など）を持つ。画像のパスはデータセットファイルのディレクトリからの相対で、`--root` で別のディレクトリを指せるので、画像をリポジトリに置かない運用ができる。あるデータセット用に設定したルートが別のデータセットにも気づかれないまま効いてしまうので、環境変数は使わない。実行前に全画像を読み込み、画像として読めることと sha256（大文字・小文字は区別しない）を照合し、問題はまとめて報告する
 - 評価器 — 下の表のとおり。結果は pydantic-evals のレポートとして端末に出す
 - 総当たり比較（要望が出てから） — `matrix.yaml` で「モデル×切り出し戦略×指示の版」を総当たりで実行し、比較表を Markdown で出力する。README にそのまま貼れる形にする
-- 評価でも `Profile` の `locate` と `redact` を適用し、実行時と同じ画像を送る。画像の差し替えの検出は、送る画像ではなく入力ファイルのハッシュで行う。向きに合う切り出し範囲がないケースは、抽出に失敗したケースと同じく 0 点にする
+- 評価でも `Profile` の `locate` と `redact` を適用し、実行時と同じ画像を送る。データセットのケースは対象画面だけで、評価は抽出の精度を測るので、画面判定はしない。画像の差し替えの検出は、送る画像ではなく入力ファイルのハッシュで行う。向きに合う切り出し範囲がないケースは、抽出に失敗したケースと同じく 0 点にする
 
 ```yaml
 schema: framelift/dataset/v1
@@ -247,7 +261,7 @@ Typer で実装する。
 
 | コマンド | 用途 | 版 |
 | --- | --- | --- |
-| `framelift run <inputs...> --profile pkg.module:obj --model ... --out DIR` | 抽出 | 0.0.1 |
+| `framelift run <inputs...> --profile pkg.module:obj --model ... --out DIR [--screen-model ...]` | 抽出（`--screen-model` は 0.3） | 0.0.1 |
 | `framelift synth --out DIR --n 100 [--videos N]` | 合成サンプルの生成（`--videos` は 0.2） | 0.0.1 |
 | `framelift eval <dataset.yaml> --profile ... --model ... [--root DIR]` | 評価 | 0.1 |
 | `framelift frames <video or image> --out DIR [--profile ...] [--frame-rate] [--motion-threshold]` | モデルに送る画像と `frames.jsonl` だけを書き出して確認する（デバッグ用）。`--profile` で切り出しと塗りつぶしを適用する（`--profile` と静止画は 0.3） | 0.2 |
@@ -270,7 +284,7 @@ Typer で実装する。
 | 0.0.1 | 画像入力、構造化抽出（検証・再試行）、`observations.jsonl`、合成サンプル（静止画）、CLI の `run`・`synth`（実装済み） |
 | 0.1 | 評価ハーネス（データセット形式、項目単位の評価器、`framelift eval`）、`Profile.item_key`、synth の `dataset.yaml`（実装済み） |
 | 0.2 | 動画入力、フレーム抽出と重複除去、集約と `items.jsonl`、合成動画、観測記録 v2（実装済み） |
-| 0.3 | 切り出し（`full` / `fixed`）と塗りつぶし、観測記録 v3（実装済み）、画面判定、キャッシュ |
+| 0.3 | 切り出し（`full` / `fixed`）と塗りつぶし、観測記録 v3、画面判定（実装済み）、キャッシュ |
 | 未定 | 総当たり比較、切り出しの `model` 戦略（要望が出てから） |
 | 1.0 | 最初の利用者での運用を経て、公開 API を確定 |
 
@@ -279,6 +293,7 @@ Typer で実装する。
 - 動画のデコードは PyAV（wheel に FFmpeg が同梱され、利用者の追加インストールが不要。テストもしやすい）
 - 画面の切り替わりは「一定間隔の抽出＋縮小画像のタイルのうち変化した割合による静止判定」で検出し、区間内で最も鮮明なフレームを採用する（スクロール中のブレたフレームを避け、依存も少ない）。当初は pHash の差で区切る予定だったが、pHash はずれやブレに強く作られているので、スクロール中の標本と静止画面を区別できなかった。画面全体の平均差も、配置が同じで文字だけが変わる切り替わりを見逃したので、タイル単位にした
 - 既定の送信ポリシーは切り出し後の画像のみ（無関係な個人情報を外部に送らない）。`Profile.locate` を必須にし、画面全体を送るときも `"full"` と明示させる
+- 画面判定は切り出し・塗りつぶし後の画像で行う。切り出しで外した領域を、判定のために外部へ送らないため
 - 切り出しは `full` と `fixed` だけを入れ、`model` は要望が出てから（bbox を得るために画面全体をプロバイダに送るので、切り出し後の画像だけを送る方針と両立しない）
 - 公開 API は `Profile` と `Pipeline` の設定に限る（使われない拡張点を 0.x のうちに約束しない）
 - 合成サンプルの生成器を同梱し、公開ベンチマークに使う（実画面を公開せずに評価結果を示せる）

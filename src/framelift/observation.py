@@ -61,13 +61,27 @@ class Usage(_Record):
     latency_ms: int = 0
 
 
+class Screen(_Record):
+    """The screen check asked before extraction (see `Profile.screen_description`)."""
+
+    is_target: bool | None = Field(
+        description="Whether the image shows the described screen; null when the check failed"
+    )
+    confidence: float | None = Field(description="How sure the check was (0-1); null on failure")
+    model: str
+    usage: Usage = Field(description="Tokens the check took, apart from the extraction's")
+    error: str | None = None
+
+
 class Observation(_Record):
     """What was read from one image or video frame."""
 
     schema_id: Literal["framelift/observation/v3"] = Field(
         default=OBSERVATION_SCHEMA, alias="schema"
     )
-    status: Literal["ok", "error"]
+    status: Literal["ok", "skipped", "error"] = Field(
+        description="skipped: the screen check found another screen, so nothing was extracted"
+    )
     profile: ProfileRef
     source: SourceRef
     frame: FrameRef | None = Field(description="The image sent; null when nothing was sent")
@@ -75,10 +89,14 @@ class Observation(_Record):
         description="How the image sent was cut from the screen; null when the input could not "
         "be read at all"
     )
-    data: dict[str, Any] | None = Field(description="The validated output; null on error")
+    screen: Screen | None = Field(
+        description="The screen check; null when the profile has no screen_description or "
+        "nothing was sent"
+    )
+    data: dict[str, Any] | None = Field(description="The validated output; null unless ok")
     error: str | None = None
     model: str
-    usage: Usage
+    usage: Usage = Field(description="Tokens the extraction took; zero when it was not asked")
     retries: int = Field(description="How many times validation asked the model to try again")
 
     def to_json(self) -> str:

@@ -14,6 +14,7 @@ from framelift._internal.aggregate import Aggregator
 from framelift._internal.extract import Extractor
 from framelift._internal.items import item_keyer
 from framelift._internal.layout import Layout, NoCropError
+from framelift._internal.screen import ScreenClassifier
 from framelift._internal.sources import (
     UnreadableInputError,
     error_reason,
@@ -92,6 +93,11 @@ class RunResult:
         return [o for o in self.observations if o.status == "ok"]
 
     @property
+    def skipped(self) -> list[Observation]:
+        """Images the screen check found to show another screen."""
+        return [o for o in self.observations if o.status == "skipped"]
+
+    @property
     def failed(self) -> list[Observation]:
         return [o for o in self.observations if o.status == "error"]
 
@@ -103,9 +109,12 @@ class Pipeline[OutputT: BaseModel]:
     Args:
         profile: What to read.
         model: A Pydantic AI model or a ``"provider:model"`` string.
+        screen_model: The model for the screen check, when the profile has a
+            ``screen_description``; ``None`` uses ``model``.
         out_dir: Where to write ``observations.jsonl`` (and ``items.jsonl`` when the profile has
             an ``item_key``). ``None`` keeps results in memory only.
-        max_retries: How many times a failed validation may ask the model to try again.
+        max_retries: How many times a failed validation may ask the model to try again, for the
+            extraction and for the screen check, each.
         anonymize_paths: Omit input paths from observations, keeping only hashes.
         frame_rate: How many video frames per second to examine.
         motion_threshold: How much of the screen (the share of 16x16 tiles, 0-1) may change
@@ -119,6 +128,7 @@ class Pipeline[OutputT: BaseModel]:
         profile: Profile[OutputT],
         *,
         model: Model | str,
+        screen_model: Model | str | None = None,
         out_dir: str | Path | None = None,
         max_retries: int = 2,
         anonymize_paths: bool = False,
@@ -127,6 +137,8 @@ class Pipeline[OutputT: BaseModel]:
     ) -> None:
         if max_retries < 0:
             raise ValueError("max_retries must be >= 0")
+        if screen_model is not None and profile.screen_description is None:
+            raise ValueError("screen_model needs a Profile.screen_description to check against")
         check_sampling(frame_rate, motion_threshold)
         self.profile = profile
         self.model = model
@@ -134,7 +146,15 @@ class Pipeline[OutputT: BaseModel]:
         self.anonymize_paths = anonymize_paths
         self.frame_rate = frame_rate
         self.motion_threshold = motion_threshold
+        self.screen_model: Model | str | None = None
+        """The model the screen check uses; None when the profile has no screen_description."""
         self._extractor = Extractor(profile, model, max_retries=max_retries)
+        self._classifier = None
+        if profile.screen_description is not None:
+            self.screen_model = model if screen_model is None else screen_model
+            self._classifier = ScreenClassifier(
+                profile.screen_description, self.screen_model, max_retries=max_retries
+            )
         self._layout = Layout.from_profile(profile)
 
     def run(self, inputs: str | Path | Iterable[str | Path]) -> RunResult:
@@ -143,6 +163,8 @@ class Pipeline[OutputT: BaseModel]:
         A failure on one input does not stop the run: an image or video that cannot be read (or
         a video that breaks off partway) and a frame whose output fails validation are recorded
         as ``status: "error"`` observations, and frames read before a video broke off are kept.
+        With a ``screen_description``, an image the screen check finds to show another screen
+        is recorded as ``status: "skipped"``, and one the check fails on as an error.
         Any other error, such as the model provider refusing a request, stops the run and is
         raised; ``items.jsonl`` is still written for the frames read until then, like
         ``observations.jsonl``.
@@ -211,9 +233,17 @@ class Pipeline[OutputT: BaseModel]:
             )
             output = None
         else:
-            observation, output = self._extractor.observe(
-                image, anonymize_paths=self.anonymize_paths
-            )
+            screen = None if self._classifier is None else self._classifier.classify(image)
+            if screen is not None and screen.is_target is not True:
+                # Another screen, or one the check could not tell: nothing is guessed at.
+                observation = self._extractor.screened_out(
+                    image, screen, anonymize_paths=self.anonymize_paths
+                )
+                output = None
+            else:
+                observation, output = self._extractor.observe(
+                    image, anonymize_paths=self.anonymize_paths, screen=screen
+                )
         result.observations.append(observation)
         if aggregator is not None:
             aggregator.add(observation, output)
