@@ -16,14 +16,16 @@ framelift turns screenshots and screen recordings into validated, provenance-tag
 - Structured extraction with [Pydantic AI](https://ai.pydantic.dev/): your model is the output type,
   your validators trigger automatic retries
 - Model-agnostic: pass any `provider:model` string supported by Pydantic AI
-- `observations.jsonl` output with source, frame, usage and retry information per image or frame
+- Only the part of the screen you choose is sent: crop each orientation to a box and paint over
+  areas such as a chat window before anything leaves your machine
+- `observations.jsonl` output with source, frame, crop, usage and retry information per image or
+  frame
 - `items.jsonl`: list items seen in several frames merged by majority vote, with disagreements kept
 - An evaluation harness built on [pydantic-evals](https://ai.pydantic.dev/evals/): score a profile
   and a model against images with expected outputs
 - A synthetic sample generator (a fictional shop screen, still or scrolling) for demos and tests
 
-Planned: screen classification, cropping and redaction, caching, and side-by-side comparison of
-models and prompts (0.3).
+Planned for 0.3: screen classification and caching.
 
 ## Install
 
@@ -54,6 +56,10 @@ shop = Profile(
     version="1",
     output_type=ShopScreen,
     instructions="Read the shop's item list exactly as displayed.",
+    # Required: what to send. "full" sends the whole screen; boxes are (left, top, right, bottom)
+    # as fractions of the upright screen, per orientation.
+    locate={"portrait": (0.0, 0.0, 1.0, 0.6), "landscape": (0.0, 0.0, 1.0, 0.9)},
+    redact=[(0.0, 0.0, 0.3, 0.05)],  # painted black before cropping, e.g. a player name
     item_key=lambda item: item.name,  # merges the same item across frames
 )
 
@@ -71,11 +77,12 @@ framelift run samples --profile examples.fantasy_shop:profile \
 Each line of `out/observations.jsonl` is one image or video frame:
 
 ```json
-{"schema": "framelift/observation/v2",
+{"schema": "framelift/observation/v3",
  "status": "ok",
  "profile": {"name": "fantasy-shop", "version": "1"},
  "source": {"path": "samples/shop-scroll-000.mp4", "sha256": "…"},
  "frame": {"index": 1, "timestamp_ms": 3000, "sha256": "…", "phash": "…"},
+ "crop": {"orientation": "landscape", "size": [1280, 720], "bbox": [0.0, 0.0, 1.0, 0.9], "redact": []},
  "data": {"shop_name": "…", "items": [{"name": "…", "price": 120}]},
  "error": null,
  "model": "anthropic:<model-name>",
@@ -84,10 +91,12 @@ Each line of `out/observations.jsonl` is one image or video frame:
 ```
 
 For a video, `frame.timestamp_ms` counts from the start of the stream. For an image,
-`frame.index` is 0, `frame.timestamp_ms` is null and `frame.sha256` is the image's.
+`frame.index` is 0 and `frame.timestamp_ms` is null. `frame.sha256` is the hash of the image sent:
+the image file's own hash only when it is sent untouched (`locate="full"` and no `redact`).
 An input that cannot be read, or a video that breaks off partway, is recorded as an observation
 with `"status": "error"` and `"frame": null` (and `"source.sha256": null` when the file itself
-cannot be opened), and the run goes on with the next input.
+cannot be opened), and the run goes on with the next input. So is a screen whose orientation has no
+box in `locate`; its `crop` gives the orientation, so you can add a box for it.
 
 ## Videos and merged items
 
@@ -161,11 +170,35 @@ The report shows, per case and on average, whether validation passed, field accu
 list-item precision and recall (items are matched with `Profile.item_key`, e.g.
 `item_key=lambda item: item.name`), tokens, latency and retries.
 
+## What is sent
+
+`Profile.locate` decides what part of each screen is sent, and is required so that sending the
+whole screen is a choice: `"full"`, or a box per orientation (`"portrait"` when the upright screen
+is taller than wide, `"landscape"` otherwise). Boxes are fractions of the upright screen: a video
+frame with its display rotation applied, an image with its EXIF orientation applied.
+`Profile.redact` boxes, in the same whole-screen coordinates, are painted opaque black before
+cropping. A screen whose orientation has no box is not sent.
+
+Boxes are fractions of the screen and only the orientation tells screens apart, so the same
+fractions land elsewhere on a screen of another aspect ratio: a tall phone and a tablet, or a
+recording with black bars or a notch. A redaction that misses is not an error; what it should have
+hidden is sent. Check what would be sent once for every device you capture on (below), and use a
+profile per device if their layouts differ. Each observation's `crop.size` records the screen's
+size in pixels, so screens of an unexpected aspect ratio can be found afterwards.
+
+To check the boxes without calling a model, write what would be sent for a screenshot or a video:
+
+```bash
+framelift frames samples/shop-000.png --profile examples.fantasy_shop:profile --out frames
+```
+
+Evaluation crops and redacts the same way, so scores reflect what a run sends.
+
 ## Privacy
 
-framelift runs locally and only sends the images you pass, and the frames it picks from your
-videos, to the model provider you choose.
-It has no telemetry. Cropping and redaction before sending are planned for 0.3.
+framelift runs locally and only sends the cropped and redacted images, from the files you pass
+and the frames it picks from your videos, to the model provider you choose.
+It has no telemetry.
 
 ## Development
 

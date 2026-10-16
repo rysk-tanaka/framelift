@@ -11,8 +11,13 @@ from typing import TYPE_CHECKING
 import imagehash
 from PIL import Image, UnidentifiedImageError
 
+from framelift._internal.layout import NoCropError, encode_png
+
 if TYPE_CHECKING:
     from collections.abc import Iterable
+
+    from framelift._internal.layout import Layout
+    from framelift.observation import Crop
 
 IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp"})
 VIDEO_SUFFIXES = frozenset({".mp4", ".mov", ".m4v", ".mkv", ".webm"})
@@ -66,7 +71,11 @@ class ImageSource:
     """SHA-256 of ``data``."""
     phash: str
     source_sha256: str
-    """SHA-256 of the input file; the same as ``sha256`` for an image."""
+    """SHA-256 of the input file; the same as ``sha256`` for an image sent as it is."""
+    crop: Crop
+    """How ``data`` was cut from the screen."""
+    view: Image.Image
+    """``data`` decoded: upright, RGB or RGBA, redacted and cropped."""
     frame_index: int = 0
     timestamp_ms: int | None = None
 
@@ -160,18 +169,34 @@ def hash_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def load_image(path: Path) -> ImageSource:
-    """Read an image, verify it decodes, and compute its SHA-256 and perceptual hash."""
+def load_image(path: Path, layout: Layout) -> ImageSource:
+    """Read an image, verify it decodes, and make the image to send with ``layout``.
+
+    The image's own bytes are sent when ``layout`` leaves the screen untouched; otherwise the
+    redacted and cropped screen is sent as PNG. Raises `UnreadableInputError` when the image
+    cannot be read, and `NoCropError` when ``layout`` has no crop box for its orientation.
+    """
     data = path.read_bytes()
-    sha256 = hashlib.sha256(data).hexdigest()
-    image, media_type = _decode(path, data, sha256)
+    source_sha256 = hashlib.sha256(data).hexdigest()
+    image, media_type = _decode(path, data, source_sha256)
     with image:
-        phash = str(imagehash.phash(image))
+        try:
+            view, crop = layout.apply(image)
+        except NoCropError as exc:
+            exc.sha256 = source_sha256
+            raise
+    if layout.is_identity:
+        sent, sha256 = data, source_sha256
+    else:
+        sent, media_type = encode_png(view), "image/png"
+        sha256 = hashlib.sha256(sent).hexdigest()
     return ImageSource(
         path=path,
-        data=data,
+        data=sent,
         media_type=media_type,
         sha256=sha256,
-        phash=phash,
-        source_sha256=sha256,
+        phash=str(imagehash.phash(view)),
+        source_sha256=source_sha256,
+        crop=crop,
+        view=view,
     )

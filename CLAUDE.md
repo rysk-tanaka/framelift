@@ -31,6 +31,7 @@ uv run pytest -m live                  # 実モデルを呼ぶテスト（API �
 uv run framelift synth --out /tmp/samples --n 3 --videos 1
 uv run framelift run /tmp/samples --profile examples.fantasy_shop:profile --model test --out /tmp/out
 uv run framelift frames /tmp/samples/shop-scroll-000.mp4 --out /tmp/frames
+uv run framelift frames /tmp/samples/shop-000.png --profile examples.fantasy_shop:profile --out /tmp/frames
 uv run framelift eval /tmp/samples/dataset.yaml --profile examples.fantasy_shop:profile --model test
 
 # ビルド
@@ -45,9 +46,11 @@ Pydantic AI の起動バナーは `PYDANTIC_AI_NO_BANNER=1` で消せる。
 Pipeline.run(inputs)
   → expand_inputs: ファイル・ディレクトリ・glob を画像・動画のパスに展開（実在するパスはそのまま使う。何も一致しなければ FileNotFoundError）
       動画があれば、モデルを呼ぶ前に PyAV を import できるか確かめる（なければ ImportError）
-  → 画像: load_image で読み込み、sha256 と知覚ハッシュ（pHash）を計算
-    動画: sample_video で一定間隔の標本を取り、縮小画像のタイルのうち変化した割合で静止区間に分け、区間ごとに最も鮮明な 1 枚を PNG にする（frame_to_source）
-  → Extractor.observe: Pydantic AI の Agent に output_type と画像（BinaryContent）を渡し、Observation（v2。source と frame）を作る
+  → 画像: load_image で読み込み、sha256 を計算し、Layout で送る画像を作る
+    動画: sample_video で一定間隔の標本を取り、縮小画像のタイルのうち変化した割合で静止区間に分け、区間ごとに最も鮮明な 1 枚に Layout を適用して PNG にする（frame_to_source）
+    Layout: EXIF の向きと色空間を正規化し、redact を黒く塗ってから locate の範囲で切り出す。向きに合う範囲がなければ NoCropError（error の観測にして次へ進む）
+    full かつ redact なしの静止画だけは、元のバイト列をそのまま送る
+  → Extractor.observe: Pydantic AI の Agent に output_type と画像（BinaryContent）を渡し、Observation（v3。source・frame・crop）を作る
       Profile.validators を output_validator に登録し、ModelRetry で再試行
       再試行を使い切ったら status: "error"。1 枚の失敗で全体は止めない
       読めない画像・動画（途中で壊れた動画、フレームのない動画を含む）は status: "error"、frame: null の観測にして次へ進む
@@ -57,21 +60,22 @@ Pipeline.run(inputs)
 framelift eval（framelift[eval] が必要）
   → load_dataset: dataset.yaml（framelift/dataset/v1）を読み、全画像の存在・読み込み・sha256 を照合
   → 正解を output_type 全体で検証し JSON 形式に揃え、item_key のキーも計算しておく（必須フィールドは省けない。合わなければ実行前にエラー）
-  → pydantic-evals の Dataset を組み、各ケースで load_image と Extractor.observe_async を 1 件ずつ実行（評価のイベントループ上で非同期に動かす）
+  → pydantic-evals の Dataset を組み、各ケースで load_image（Profile の Layout を適用）と Extractor.observe_async を 1 件ずつ実行（評価のイベントループ上で非同期に動かす）
       出力は Observation と検証済みのモデル。項目のキーはこのモデルから取り、保存した JSON を検証し直さない
-      読んだ画像の sha256 をもう一度照合し、照合後に差し替わっていたらそのケースを失敗にする
+      読んだ入力ファイルの sha256 をもう一度照合し、照合後に差し替わっていたらそのケースを失敗にする（送る画像は切り出すと別の PNG になるので、入力ファイルのハッシュで比べる）
   → 評価器（検証の通過、フィールド一致率、item_key による適合率・再現率、usage）でレポートを出す
       ケースや評価器が異常終了したら終了コード 1。スコアが低いだけなら 0
 ```
 
-- `src/framelift/profile.py` — `Profile`（`name`・`version`・`output_type`・`instructions`・`validators`・`item_key`）と `Validator` 型。`fingerprint` は結果に影響する項目のハッシュ。`item_field` は `item_key` を適用する一覧フィールド（トップレベルでただ 1 つの `list[モデル]`。`| None` も可）を返す
+- `src/framelift/profile.py` — `Profile`（`name`・`version`・`output_type`・`instructions`・`validators`・`locate`・`redact`・`item_key`）と `Validator`・`Box`・`Orientation` 型。`locate` は必須で、`redact` は向きごとの dict に正規化して持つ。`fingerprint` は結果に影響する項目のハッシュ。`item_field` は `item_key` を適用する一覧フィールド（トップレベルでただ 1 つの `list[モデル]`。`| None` も可）を返す
 - `src/framelift/pipeline.py` — `Pipeline` と `RunResult`
-- `src/framelift/observation.py` — 出力レコード（`framelift/observation/v2`）。`schema` は Python 側では `schema_id`（alias で `schema` として出力）
+- `src/framelift/observation.py` — 出力レコード（`framelift/observation/v3`）。v3 は 0.3.0 で初めてリリースするので、0.3 の間は v3 に項目を足しても版を上げない。`schema` は Python 側では `schema_id`（alias で `schema` として出力）
 - `src/framelift/item.py` — 集約後のレコード `Item`（`framelift/item/v1`）
-- `src/framelift/cli.py` — Typer の CLI（`run`・`eval`・`frames`・`synth`）。`eval` は pydantic-evals を遅延 import する。`--profile` は `package.module:attribute` 形式で、カレントディレクトリを `sys.path` に追加して読み込む
+- `src/framelift/cli.py` — Typer の CLI（`run`・`eval`・`frames`・`synth`）。`frames` は静止画も受け付け、`--profile` で送る画像を確かめられる。`eval` は pydantic-evals を遅延 import する。`--profile` は `package.module:attribute` 形式で、カレントディレクトリを `sys.path` に追加して読み込む
 - `src/framelift/_internal/` — 内部実装（公開 API ではない）
   - `sources.py` — 入力の展開、画像の読み込み、ファイルの sha256
   - `video.py` — 動画の標本取り、静止区間の判定、代表フレームの選択（PyAV を遅延 import する）
+  - `layout.py` — 送る画像を作る（EXIF の向きと色空間の正規化、塗りつぶし、切り出し）。`NoCropError`
   - `items.py` — `item_key` による項目のキー計算と dump。評価と集約で共有する
   - `aggregate.py` — 複数フレームの項目の多数決と `Item` の組み立て
   - `extract.py` — Pydantic AI による抽出と Observation の組み立て
@@ -85,16 +89,16 @@ framelift eval（framelift[eval] が必要）
 
 - 公開 API は `framelift/__init__.py` の `__all__`（`Profile`・`Pipeline`・`Observation`・`Item`・`RunResult`・`Validator`）だけ。`_internal` 配下は予告なく変えてよい。利用者から要望が出るまで、パイプラインの各段を公開しない
 - `Profile` の項目は、それを使う機能と同じ版で足す。先回りして拡張点を作らない
-- 出力やデータセットの形式を変えるときは、スキーマの版（`framelift/observation/v2`・`framelift/item/v1`・`framelift/dataset/v1` の末尾）を上げる
+- 出力やデータセットの形式を変えるときは、スキーマの版（`framelift/observation/v3`・`framelift/item/v1`・`framelift/dataset/v1` の末尾）を上げる。ただし、まだどのリリースも書いていない版は、同じ版のまま項目を足してよい
 - ゲームやアプリの実在する名称・画像をリポジトリに入れない。例・テスト・ベンチマークは `synth` の架空の画面で作る
 - 画像と動画はコミットしない。`.gitignore` で一括除外し、`samples/` と `docs/assets/` だけを許可している
-- 外部に送るのは利用者が渡した画像と、動画から選んだフレームだけ。テレメトリは持たない
+- 外部に送るのは、利用者が渡した画像と動画から選んだフレームを、`Profile.locate` で切り出し `Profile.redact` で塗りつぶしたものだけ。テレメトリは持たない
 
 ## 今後の予定
 
 設計の詳細と判断の理由は [docs/README.md](docs/README.md) から辿れる。
 
-- 0.3 — 画面判定、切り出し（`full`・`fixed`・`model`）と塗りつぶし、抽出結果のキャッシュ、設定の総当たり比較
+- 0.3 — 切り出し（`full`・`fixed`）と塗りつぶし（実装済み）、画面判定、抽出結果のキャッシュ。総当たり比較と切り出しの `model` 戦略は要望が出てから
 - 1.0 — 公開 API の確定
 
 ## コーディング規約

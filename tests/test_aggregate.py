@@ -32,6 +32,7 @@ def _observation(index: int, *, status: str = "ok") -> Observation:
             "frame": FrameRef(
                 index=index, timestamp_ms=index * 1000, sha256=f"f{index}", phash="0"
             ),
+            "crop": None,
             "data": {} if status == "ok" else None,
             "error": None if status == "ok" else "failed",
             "model": "m",
@@ -42,7 +43,9 @@ def _observation(index: int, *, status: str = "ok") -> Observation:
 
 
 def _profile(output_type: type[BaseModel] = Table, key: Any = lambda r: r.name) -> Profile:
-    return Profile(name="p", output_type=output_type, instructions="read", item_key=key)
+    return Profile(
+        locate="full", name="p", output_type=output_type, instructions="read", item_key=key
+    )
 
 
 def _aggregate(profile: Profile, frames: list[Any]) -> Aggregator:

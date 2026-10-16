@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from framelift._internal.layout import Layout
 from framelift._internal.sources import expand_inputs, hash_file, load_image
 
 
@@ -31,7 +32,7 @@ def test_expand_raises_when_nothing_matches(tmp_path: Path) -> None:
 def test_load_image_hashes(samples: tuple[Path, list]) -> None:
     root, truths = samples
     path = root / truths[0].file
-    image = load_image(path)
+    image = load_image(path, Layout.full())
     assert image.media_type == "image/png"
     assert image.sha256 == hashlib.sha256(path.read_bytes()).hexdigest()
     assert len(image.phash) == 16
@@ -41,7 +42,7 @@ def test_load_image_rejects_non_images(tmp_path: Path) -> None:
     fake = tmp_path / "fake.png"
     fake.write_text("not an image")
     with pytest.raises(ValueError, match="Not a readable image"):
-        load_image(fake)
+        load_image(fake, Layout.full())
 
 
 def test_existing_paths_with_glob_characters_are_taken_literally(samples) -> None:

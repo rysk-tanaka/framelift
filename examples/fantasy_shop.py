@@ -2,6 +2,7 @@
 
 Usage:
     framelift synth --out samples --n 3
+    framelift frames samples/shop-000.png --profile examples.fantasy_shop:profile --out frames
     framelift run "samples/*.png" --profile examples.fantasy_shop:profile \
         --model anthropic:<model-name> --out out
     framelift eval samples/dataset.yaml --profile examples.fantasy_shop:profile \
@@ -41,5 +42,8 @@ profile = Profile(
         "keeping names exactly as displayed."
     ),
     validators=[items_are_unique],
+    # Only the header and the item list are sent. On the synthetic screens the last row ends at
+    # 57% of the height in portrait and 89% in landscape; below it is the footer of the videos.
+    locate={"portrait": (0.0, 0.0, 1.0, 0.6), "landscape": (0.0, 0.0, 1.0, 0.9)},
     item_key=lambda item: item.name,
 )

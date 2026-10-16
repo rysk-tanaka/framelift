@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import re
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import date
 from enum import Enum
 from pathlib import Path
 from typing import Any, Literal
 
 import pytest
+from PIL import Image
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -30,7 +33,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_core import to_json
 
 from examples.fantasy_shop import ShopScreen
-from examples.fantasy_shop import profile as shop_profile
+from examples.fantasy_shop import profile as fantasy_shop_profile
 from framelift import Profile
 from framelift._internal.dataset import load_dataset, write_dataset
 from framelift._internal.evaluation import (
@@ -42,6 +45,9 @@ from framelift._internal.evaluation import (
     normalize_expected,
     run_evaluation,
 )
+
+# Most tests look up the answer by the hash of the input image, so the screen is sent whole.
+shop_profile = replace(fantasy_shop_profile, locate="full")
 
 type Answer = Callable[[dict[str, Any]], dict[str, Any]]
 
@@ -203,7 +209,11 @@ class AliasedTable(BaseModel):
 
 def test_items_of_aliased_models_are_matched() -> None:
     profile = Profile(
-        name="p", output_type=AliasedTable, instructions="read", item_key=lambda r: r.name
+        locate="full",
+        name="p",
+        output_type=AliasedTable,
+        instructions="read",
+        item_key=lambda r: r.name,
     )
     raw_output = {"rows": [{"Name": "a", "price": 1}]}
     expected = {"rows": [{"name": "a", "price": 2}]}  # datasets use field names
@@ -238,7 +248,9 @@ RICH = {"ident": {"code": "a"}, "rarity": "rare", "since": "2026-01-02"}
 
 
 def _rich_profile(key: Callable[[Any], Any]) -> Profile:
-    return Profile(name="p", output_type=RichTable, instructions="read", item_key=key)
+    return Profile(
+        locate="full", name="p", output_type=RichTable, instructions="read", item_key=key
+    )
 
 
 @pytest.mark.parametrize(
@@ -276,7 +288,11 @@ def test_lists_without_item_key_compare_listed_fields_by_position() -> None:
 
 def test_duplicate_keys_are_paired_in_order() -> None:
     profile = Profile(
-        name="p", output_type=ShopScreen, instructions="read", item_key=lambda i: i.name
+        locate="full",
+        name="p",
+        output_type=ShopScreen,
+        instructions="read",
+        item_key=lambda i: i.name,
     )
     raw_output = {"shop_name": "s", "items": [{"name": "a", "price": 1}, {"name": "a", "price": 2}]}
 
@@ -383,7 +399,9 @@ def test_nested_values_go_through_their_model_validators(output_type: type[BaseM
 
 
 def test_items_are_keyed_after_item_validators() -> None:
-    profile = Profile(name="p", output_type=Order, instructions="read", item_key=lambda p: p.name)
+    profile = Profile(
+        locate="full", name="p", output_type=Order, instructions="read", item_key=lambda p: p.name
+    )
     raw_output = {"title": "x", "parts": [{"name": "bolt", "price": 5}]}
     expected = {"title": "x", "parts": [{"name": "BOLT", "price": 5}]}
 
@@ -421,7 +439,9 @@ class Tagged(BaseModel):
 
 
 def test_non_idempotent_validators_are_applied_once_on_both_sides() -> None:
-    profile = Profile(name="p", output_type=Tagged, instructions="read", item_key=lambda r: r.name)
+    profile = Profile(
+        locate="full", name="p", output_type=Tagged, instructions="read", item_key=lambda r: r.name
+    )
     raw = {"rows": [{"name": "a"}]}
 
     assert _mismatches(profile, raw, raw) == (1, 0, [])
@@ -439,7 +459,9 @@ class Counted(BaseModel):
 
 
 def test_outputs_that_cannot_be_validated_again_are_scored() -> None:
-    profile = Profile(name="p", output_type=Counted, instructions="read", item_key=lambda r: r.name)
+    profile = Profile(
+        locate="full", name="p", output_type=Counted, instructions="read", item_key=lambda r: r.name
+    )
     raw = {"rows": [{"name": "a"}]}
 
     assert _mismatches(profile, raw, raw) == (1, 0, [])
@@ -455,7 +477,11 @@ class MaybeTable(BaseModel):
 
 def test_item_key_errors_on_expected_items_are_dataset_errors() -> None:
     profile = Profile(
-        name="p", output_type=MaybeTable, instructions="read", item_key=lambda r: r.name.lower()
+        locate="full",
+        name="p",
+        output_type=MaybeTable,
+        instructions="read",
+        item_key=lambda r: r.name.lower(),
     )
     with pytest.raises(ValueError, match="item_key failed on an expected item"):
         expected_output(profile, {"rows": [{"name": None}]})
@@ -463,7 +489,11 @@ def test_item_key_errors_on_expected_items_are_dataset_errors() -> None:
 
 def test_item_key_errors_on_extracted_items_count_as_misreads() -> None:
     profile = Profile(
-        name="p", output_type=MaybeTable, instructions="read", item_key=lambda r: r.name.lower()
+        locate="full",
+        name="p",
+        output_type=MaybeTable,
+        instructions="read",
+        item_key=lambda r: r.name.lower(),
     )
     raw_output = {"rows": [{"name": None}, {"name": "a"}]}
 
@@ -472,7 +502,11 @@ def test_item_key_errors_on_extracted_items_count_as_misreads() -> None:
 
 def test_any_item_key_error_on_expected_items_is_a_dataset_error() -> None:
     profile = Profile(
-        name="p", output_type=MaybeTable, instructions="read", item_key=lambda r: r.name[5]
+        locate="full",
+        name="p",
+        output_type=MaybeTable,
+        instructions="read",
+        item_key=lambda r: r.name[5],
     )
     with pytest.raises(ValueError, match="IndexError"):
         expected_output(profile, {"rows": [{"name": "a"}]})
@@ -547,7 +581,11 @@ def test_extra_fields_of_models_that_allow_them_are_compared() -> None:
 
 def test_an_expected_empty_list_counts_extra_items_as_a_misread() -> None:
     profile = Profile(
-        name="p", output_type=ShopScreen, instructions="read", item_key=lambda i: i.name
+        locate="full",
+        name="p",
+        output_type=ShopScreen,
+        instructions="read",
+        item_key=lambda i: i.name,
     )
     raw_output = {"shop_name": "A", "items": [{"name": "Made Up", "price": 5}]}
 
@@ -573,7 +611,9 @@ class Sorted(BaseModel):
 
 
 def test_a_reordering_list_serializer_keeps_keys_and_values_together() -> None:
-    profile = Profile(name="p", output_type=Sorted, instructions="read", item_key=lambda o: o.title)
+    profile = Profile(
+        locate="full", name="p", output_type=Sorted, instructions="read", item_key=lambda o: o.title
+    )
     expected = {"rows": [{"title": "b", "parts": []}, {"title": "a", "parts": []}]}
     raw_output = {"rows": [{"title": "a", "parts": []}, {"title": "b", "parts": []}]}
 
@@ -582,7 +622,11 @@ def test_a_reordering_list_serializer_keeps_keys_and_values_together() -> None:
 
 def test_a_none_key_is_a_valid_key() -> None:
     profile = Profile(
-        name="p", output_type=MaybeTable, instructions="read", item_key=lambda r: r.name
+        locate="full",
+        name="p",
+        output_type=MaybeTable,
+        instructions="read",
+        item_key=lambda r: r.name,
     )
     raw = {"rows": [{"name": None}, {"name": "a"}]}
 
@@ -591,6 +635,7 @@ def test_a_none_key_is_a_valid_key() -> None:
 
 def test_unhashable_keys_on_extracted_items_count_as_misreads() -> None:
     profile = Profile(
+        locate="full",
         name="p",
         output_type=MaybeTable,
         instructions="read",
@@ -610,8 +655,54 @@ class Tags(BaseModel):
 
 
 def test_items_that_are_not_objects_are_paired_by_key() -> None:
-    profile = Profile(name="p", output_type=Tags, instructions="read", item_key=lambda t: t.root)
+    profile = Profile(
+        locate="full", name="p", output_type=Tags, instructions="read", item_key=lambda t: t.root
+    )
     expected = {"tags": ["a", "b"]}
 
     assert _mismatches(profile, expected, {"tags": ["b", "a"]}) == (2, 0, [])
     assert _mismatches(profile, expected, {"tags": ["a"]}) == (2, 1, ["tags['b'] (missing)"])
+
+
+def _image_sizes(sizes: list[tuple[int, int]]) -> FunctionModel:
+    """A model that notes the size of every image it is sent and gives one valid answer."""
+
+    def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        for message in messages:
+            for part in getattr(message, "parts", ()):
+                if isinstance(part, UserPromptPart) and not isinstance(part.content, str):
+                    for item in part.content:
+                        if isinstance(item, BinaryContent):
+                            with Image.open(io.BytesIO(item.data)) as image:
+                                sizes.append(image.size)
+        data = {"shop_name": "A", "items": [{"name": "a", "price": 1}]}
+        return ModelResponse(parts=[ToolCallPart(info.output_tools[0].name, data)])
+
+    return FunctionModel(respond)
+
+
+def test_evaluation_sends_the_cropped_image_like_a_run(samples) -> None:
+    root, _ = samples
+    sizes: list[tuple[int, int]] = []
+    dataset = build_dataset(root / "dataset.yaml", fantasy_shop_profile)
+
+    report = run_evaluation(dataset, fantasy_shop_profile, _image_sizes(sizes), progress=False)
+
+    # The input file's hash is checked, so a cropped image (a new PNG) is not taken as replaced.
+    assert not report.failures
+    assert sizes == [(720, 768), (1280, 648), (720, 768)]
+
+
+def test_a_case_without_a_crop_box_scores_like_a_failed_extraction(samples) -> None:
+    root, _ = samples  # shop-001 is landscape
+    profile = replace(fantasy_shop_profile, locate={"portrait": (0.0, 0.0, 1.0, 0.6)})
+    sizes: list[tuple[int, int]] = []
+    dataset = build_dataset(root / "dataset.yaml", profile)
+
+    report = run_evaluation(dataset, profile, _image_sizes(sizes), progress=False)
+
+    assert not report.failures
+    landscape = next(case for case in report.cases if case.name == "shop-001")
+    assert landscape.assertions["ValidationPassed"].value is False
+    assert landscape.scores["FieldAccuracy"].value == 0.0
+    assert len(sizes) == 2

@@ -1,4 +1,4 @@
-"""The `framelift/observation/v2` record written to ``observations.jsonl``."""
+"""The `framelift/observation/v3` record written to ``observations.jsonl``."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-OBSERVATION_SCHEMA = "framelift/observation/v2"
+OBSERVATION_SCHEMA = "framelift/observation/v3"
 
 
 class _Record(BaseModel):
@@ -34,6 +34,26 @@ class FrameRef(_Record):
     phash: str = Field(description="Perceptual hash (hex) of the image")
 
 
+type _Box = tuple[float, float, float, float]
+
+
+class Crop(_Record):
+    """How the image sent was cut from the screen (see `Profile.locate` and `Profile.redact`)."""
+
+    orientation: Literal["portrait", "landscape"] = Field(
+        description="Orientation of the upright screen"
+    )
+    size: tuple[int, int] = Field(
+        description="(width, height) of the upright screen in pixels, before cropping. Boxes are "
+        "fractions of it, so a screen of another aspect ratio may need other boxes"
+    )
+    bbox: _Box | None = Field(
+        description="(left, top, right, bottom) cropped, as fractions of the upright screen; "
+        "[0, 0, 1, 1] for locate='full'; null when no crop box fits the orientation"
+    )
+    redact: list[_Box] = Field(description="Boxes painted black before cropping")
+
+
 class Usage(_Record):
     input_tokens: int = 0
     output_tokens: int = 0
@@ -44,14 +64,16 @@ class Usage(_Record):
 class Observation(_Record):
     """What was read from one image or video frame."""
 
-    schema_id: Literal["framelift/observation/v2"] = Field(
+    schema_id: Literal["framelift/observation/v3"] = Field(
         default=OBSERVATION_SCHEMA, alias="schema"
     )
     status: Literal["ok", "error"]
     profile: ProfileRef
     source: SourceRef
-    frame: FrameRef | None = Field(
-        description="The image sent; null when the input could not be read at all"
+    frame: FrameRef | None = Field(description="The image sent; null when nothing was sent")
+    crop: Crop | None = Field(
+        description="How the image sent was cut from the screen; null when the input could not "
+        "be read at all"
     )
     data: dict[str, Any] | None = Field(description="The validated output; null on error")
     error: str | None = None
