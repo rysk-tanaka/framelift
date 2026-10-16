@@ -33,6 +33,7 @@ def _observation(index: int, *, status: str = "ok") -> Observation:
                 index=index, timestamp_ms=index * 1000, sha256=f"f{index}", phash="0"
             ),
             "crop": None,
+            "screen": None,
             "data": {} if status == "ok" else None,
             "error": None if status == "ok" else "failed",
             "model": "m",

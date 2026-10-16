@@ -4,6 +4,7 @@ import json
 import re
 import sys
 from pathlib import Path
+from typing import Any
 
 import imagehash
 import pytest
@@ -295,7 +296,7 @@ def test_run_reports_unreadable_inputs_as_failures(
     )
 
     assert result.exit_code == 1
-    assert "0 ok, 1 failed" in result.output
+    assert "0 ok, 0 skipped, 1 failed" in result.output
     assert "Traceback" not in result.output
 
 
@@ -362,7 +363,7 @@ def test_video_commands_without_the_extra_explain_how_to_install_it(
     assert "Traceback" not in result.output
 
 
-def test_run_says_why_items_were_skipped(
+def test_run_says_why_items_were_left_out(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, samples
 ) -> None:
     root, _ = samples
@@ -392,7 +393,103 @@ def test_run_says_why_items_were_skipped(
     )
 
     assert result.exit_code == 0, result.output
-    assert "skipped because item_key failed, e.g. KeyError(" in result.output
+    assert "left out because item_key failed, e.g. KeyError(" in result.output
+
+
+def _screened_profile(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "screened_profile.py").write_text(
+        "from dataclasses import replace\n"
+        "from examples.fantasy_shop import profile as shop\n"
+        'profile = replace(shop, screen_description="a shop\'s item list")\n'
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1]))
+
+
+def test_run_checks_the_screen_with_the_screen_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, samples
+) -> None:
+    root, _ = samples
+    _screened_profile(tmp_path, monkeypatch)
+    out = tmp_path / "out"
+    # "test" is the only model that runs offline, so the screen model is given another name and
+    # swapped for it once the CLI has passed it on, to tell the two options apart.
+    passed: dict[str, object] = {}
+    pipeline = cli_module.Pipeline
+
+    def spy(profile, **kwargs: Any):
+        passed.update(kwargs)
+        kwargs["screen_model"] = "test"
+        return pipeline(profile, **kwargs)
+
+    monkeypatch.setattr(cli_module, "Pipeline", spy)
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            str(root),
+            "--profile",
+            "screened_profile:profile",
+            "--model",
+            "test",
+            "--screen-model",
+            "screen:model",
+            "--out",
+            str(out),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert passed["model"] == "test"
+    assert passed["screen_model"] == "screen:model"
+    observations = [
+        Observation.model_validate_json(line)
+        for line in (out / "observations.jsonl").read_text().splitlines()
+    ]
+    assert len(observations) == 3
+    assert all(o.screen is not None and o.screen.model == "test" for o in observations)
+    ok = sum(o.status == "ok" for o in observations)
+    assert f"{ok} ok, {3 - ok} skipped, 0 failed" in result.output
+
+
+def test_other_pipeline_errors_are_not_blamed_on_the_screen_model(
+    samples, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, _ = samples
+
+    def broken(*args: Any, **kwargs: Any):
+        raise ValueError("something else")
+
+    monkeypatch.setattr(cli_module, "Pipeline", broken)
+
+    result = runner.invoke(
+        app, ["run", str(root), "--profile", "examples.fantasy_shop:profile", "--model", "test"]
+    )
+
+    assert isinstance(result.exception, ValueError)
+    assert "--screen-model" not in _plain(result.output)
+
+
+def test_a_screen_model_without_a_screen_description_is_a_usage_error(samples) -> None:
+    root, _ = samples
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            str(root),
+            "--profile",
+            "examples.fantasy_shop:profile",
+            "--model",
+            "test",
+            "--screen-model",
+            "test",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "Invalid value for --screen-model" in _plain(result.output)
 
 
 def test_an_import_error_from_profile_code_is_not_a_usage_error(

@@ -130,7 +130,20 @@ def run(
     profile: Annotated[str, typer.Option(help="Profile to use, as 'package.module:attribute'")],
     model: Annotated[str, typer.Option(help="Pydantic AI model, e.g. 'anthropic:<model-name>'")],
     out: Annotated[Path, typer.Option(help="Output directory")] = Path("out"),
-    max_retries: Annotated[int, typer.Option(min=0, help="Retries when validation fails")] = 2,
+    screen_model: Annotated[
+        str | None,
+        typer.Option(
+            help="Pydantic AI model for the screen check of a profile with a "
+            "screen_description [default: --model]"
+        ),
+    ] = None,
+    max_retries: Annotated[
+        int,
+        typer.Option(
+            min=0,
+            help="Retries when validation fails, for the extraction and the screen check each",
+        ),
+    ] = 2,
     anonymize_paths: Annotated[
         bool, typer.Option(help="Write only hashes, not input paths, to the output")
     ] = False,
@@ -138,15 +151,24 @@ def run(
     motion_threshold: MotionThreshold = _video.DEFAULT_MOTION_THRESHOLD,
 ) -> None:
     """Extract data from images and videos; write observations.jsonl and items.jsonl."""
-    pipeline = Pipeline(
-        load_profile(profile),
-        model=model,
-        out_dir=out,
-        max_retries=max_retries,
-        anonymize_paths=anonymize_paths,
-        frame_rate=frame_rate,
-        motion_threshold=motion_threshold,
-    )
+    loaded = load_profile(profile)
+    try:
+        pipeline = Pipeline(
+            loaded,
+            model=model,
+            screen_model=screen_model,
+            out_dir=out,
+            max_retries=max_retries,
+            anonymize_paths=anonymize_paths,
+            frame_rate=frame_rate,
+            motion_threshold=motion_threshold,
+        )
+    except ValueError as exc:
+        # The other settings are checked by their options first; only a --screen-model for a
+        # profile with no screen_description is left to Pipeline.
+        if screen_model is None or loaded.screen_description is not None:
+            raise
+        raise typer.BadParameter(str(exc), param_hint="--screen-model") from exc
     try:
         result = pipeline.run(inputs)
     except FileNotFoundError as exc:
@@ -155,14 +177,15 @@ def run(
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=2) from exc
     typer.echo(
-        f"{len(result.succeeded)} ok, {len(result.failed)} failed -> {result.output_path}",
+        f"{len(result.succeeded)} ok, {len(result.skipped)} skipped, {len(result.failed)} failed "
+        f"-> {result.output_path}",
         err=True,
     )
     if result.items_path is not None:
         unkeyed = ""
         if result.unkeyed_items:
             unkeyed = (
-                f" ({result.unkeyed_items} skipped because item_key failed, "
+                f" ({result.unkeyed_items} left out because item_key failed, "
                 f"e.g. {result.unkeyed_error})"
             )
         typer.echo(f"{len(result.items)} items{unkeyed} -> {result.items_path}", err=True)

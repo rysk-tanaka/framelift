@@ -24,6 +24,7 @@ from examples.fantasy_shop import profile as fantasy_shop_profile
 from framelift import Item, Observation, Pipeline, Profile
 from framelift import pipeline as pipeline_module
 from framelift._internal import video as video_module
+from framelift._internal.screen import screen_image
 from framelift.observation import FrameRef
 
 # Most tests look up the answer by the hash of the input image, so the screen is sent whole.
@@ -535,3 +536,213 @@ def test_video_frames_without_a_crop_box_are_errors_and_the_video_goes_on(scroll
     video_sha = hashlib.sha256(path.read_bytes()).hexdigest()
     assert all(o.source.sha256 == video_sha for o in result.observations)
     assert sent == []
+
+
+screen_profile = replace(shop_profile, screen_description="a shop's item list")
+
+
+def _content(messages: list[ModelMessage]) -> BinaryContent:
+    for message in messages:
+        for part in getattr(message, "parts", ()):
+            if isinstance(part, UserPromptPart) and not isinstance(part.content, str):
+                for item in part.content:
+                    if isinstance(item, BinaryContent):
+                        return item
+    raise AssertionError("no image in the request")
+
+
+def _decoded(content: BinaryContent) -> Image.Image:
+    image = Image.open(io.BytesIO(content.data))
+    image.load()
+    return image
+
+
+def _screen_router(
+    is_target, screens: list[BinaryContent], extractions: list[BinaryContent]
+) -> FunctionModel:
+    """One model for both requests, told apart by the name of their output tool."""
+
+    def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        content = _content(messages)
+        if info.output_tools[0].name == "screen_check":
+            screens.append(content)
+            answer = {"is_target": is_target(_decoded(content)), "confidence": 0.9}
+            return ModelResponse(parts=[ToolCallPart("screen_check", answer)])
+        assert info.output_tools[0].name == "final_result"
+        extractions.append(content)
+        return _fixed_answer(messages, info)
+
+    return FunctionModel(respond)
+
+
+def _portrait(image: Image.Image) -> bool:
+    return image.height > image.width
+
+
+def test_images_of_another_screen_are_skipped_without_extraction(samples, tmp_path: Path) -> None:
+    root, _ = samples  # shop-000 and shop-002 are portrait, shop-001 landscape
+    screens: list[BinaryContent] = []
+    extractions: list[BinaryContent] = []
+    model = _screen_router(_portrait, screens, extractions)
+
+    result = Pipeline(screen_profile, model=model, out_dir=tmp_path / "out").run(root)
+
+    assert [o.status for o in result.observations] == ["ok", "skipped", "ok"]
+    assert len(screens) == 3
+    assert len(extractions) == 2
+    skipped = result.observations[1]
+    assert result.skipped == [skipped]
+    assert result.failed == []
+    assert skipped.frame is not None
+    assert skipped.data is None and skipped.error is None
+    assert skipped.usage.requests == 0 and skipped.retries == 0
+    assert skipped.screen is not None
+    assert skipped.screen.is_target is False
+    assert skipped.screen.confidence == 0.9
+    assert skipped.screen.usage.requests == 1
+    assert skipped.screen.model == skipped.model
+    read = result.observations[0]
+    assert read.screen is not None and read.screen.is_target is True
+    assert read.usage.requests == 1
+    # A skipped image is not a vote.
+    (item,) = result.items
+    assert item.votes == 2
+    assert skipped.source.sha256 not in {e.source_sha256 for e in item.evidence}
+    lines = (tmp_path / "out" / "observations.jsonl").read_text().splitlines()
+    assert '"status":"skipped"' in lines[1]
+
+
+def test_a_failed_screen_check_is_an_error_and_nothing_is_extracted(samples) -> None:
+    root, truths = samples
+    extractions: list[BinaryContent] = []
+
+    def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        if info.output_tools[0].name == "screen_check":
+            answer = {"is_target": True, "confidence": 2.0}  # out of range every time
+            return ModelResponse(parts=[ToolCallPart("screen_check", answer)])
+        extractions.append(_content(messages))
+        return _fixed_answer(messages, info)
+
+    result = Pipeline(screen_profile, model=FunctionModel(respond), max_retries=1).run(
+        root / truths[0].file
+    )
+
+    (observation,) = result.observations
+    assert observation.status == "error"
+    assert observation.error is not None and observation.error.startswith("Screen check failed")
+    assert observation.screen is not None
+    assert observation.screen.is_target is None and observation.screen.confidence is None
+    assert observation.screen.error is not None
+    assert observation.screen.usage.requests == 2  # the check's tokens are kept
+    assert observation.usage.requests == 0
+    assert extractions == []
+
+
+def test_the_screen_check_can_use_its_own_model(samples) -> None:
+    root, truths = samples
+    asked: list[str] = []
+
+    def screen(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        asked.append(f"screen:{info.output_tools[0].name}")
+        answer = {"is_target": True, "confidence": 1.0}
+        return ModelResponse(parts=[ToolCallPart("screen_check", answer)])
+
+    def extract(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        asked.append(f"extract:{info.output_tools[0].name}")
+        return _fixed_answer(messages, info)
+
+    screen_model = FunctionModel(screen)
+    pipeline = Pipeline(screen_profile, model=FunctionModel(extract), screen_model=screen_model)
+    result = pipeline.run(root / truths[0].file)
+
+    assert pipeline.screen_model is screen_model
+    assert asked == ["screen:screen_check", "extract:final_result"]
+    (observation,) = result.observations
+    assert observation.screen is not None
+    assert "screen" in observation.screen.model
+    assert "extract" in observation.model
+
+
+def test_a_screen_model_needs_a_screen_description() -> None:
+    with pytest.raises(ValueError, match="screen_description"):
+        Pipeline(shop_profile, model="test", screen_model="test")
+
+
+def test_without_a_screen_description_nothing_is_checked(samples) -> None:
+    root, truths = samples
+    screens: list[BinaryContent] = []
+    extractions: list[BinaryContent] = []
+
+    result = Pipeline(shop_profile, model=_screen_router(_portrait, screens, extractions)).run(
+        root / truths[1].file  # landscape: would be skipped if it were checked
+    )
+
+    assert [o.status for o in result.observations] == ["ok"]
+    assert result.observations[0].screen is None
+    assert screens == []
+    assert Pipeline(shop_profile, model="test").screen_model is None
+
+
+def test_the_screen_check_defaults_to_the_extraction_model() -> None:
+    assert Pipeline(screen_profile, model="test").screen_model == "test"
+
+
+def _cmyk_jpeg(path: Path) -> Path:
+    Image.new("CMYK", (100, 200), (0, 255, 255, 0)).save(path, format="JPEG")
+    return path
+
+
+def _sideways_jpeg(path: Path) -> Path:
+    # Stored landscape, red on the left; EXIF orientation 6 shows it portrait, red on top.
+    stored = Image.new("RGB", (200, 100), (0, 0, 255))
+    stored.paste((255, 0, 0), (0, 0, 100, 100))
+    exif = Image.Exif()
+    exif[0x0112] = 6
+    stored.save(path, format="JPEG", exif=exif.tobytes(), quality=95)
+    return path
+
+
+@pytest.mark.parametrize("make", [_cmyk_jpeg, _sideways_jpeg], ids=["cmyk", "exif-6"])
+def test_the_screen_check_gets_an_upright_png_of_an_image_sent_as_it_is(
+    tmp_path: Path, make
+) -> None:
+    path = make(tmp_path / "shot.jpg")
+    screens: list[BinaryContent] = []
+    extractions: list[BinaryContent] = []
+
+    Pipeline(screen_profile, model=_screen_router(_portrait, screens, extractions)).run(path)
+
+    ((screen,), (extraction,)) = screens, extractions
+    assert extraction.data == path.read_bytes()  # the file as it is
+    assert screen.media_type == "image/png"
+    image = _decoded(screen)
+    assert image.format == "PNG"
+    assert image.mode == "RGB"
+    assert image.size == (100, 200)  # upright
+    if make is _sideways_jpeg:
+        pixel = image.getpixel((50, 20))
+        assert isinstance(pixel, tuple)
+        assert pixel[0] > 200 and pixel[2] < 60  # red
+
+
+@pytest.mark.parametrize(
+    "box",
+    [(0.0, 0.0, 1.0, 0.6), (0.0, 0.0, 1.0, 0.3)],
+    ids=["portrait-crop", "landscape-crop-of-a-portrait-screen"],
+)
+def test_the_screen_check_gets_the_sent_image_shrunk_once(samples, box) -> None:
+    root, truths = samples
+    profile = replace(screen_profile, locate={"portrait": box}, redact=[(0.0, 0.0, 1.0, 0.05)])
+    screens: list[BinaryContent] = []
+    extractions: list[BinaryContent] = []
+
+    result = Pipeline(profile, model=_screen_router(lambda _: True, screens, extractions)).run(
+        root / truths[0].file  # portrait, 720x1280
+    )
+
+    assert [o.status for o in result.observations] == ["ok"]
+    ((screen,), (extraction,)) = screens, extractions
+    expected = Image.open(io.BytesIO(screen_image(_decoded(extraction))))
+    checked = _decoded(screen)
+    assert checked.size == expected.size
+    assert checked.tobytes() == expected.tobytes()

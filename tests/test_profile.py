@@ -153,3 +153,25 @@ def test_fingerprint_changes_with_locate_and_redact() -> None:
     assert full == fingerprint(locate="full", redact=[])
     assert full != fingerprint(locate={"portrait": (0, 0, 1, 0.5)})
     assert full != fingerprint(locate="full", redact=[(0, 0, 1, 0.5)])
+
+
+@pytest.mark.parametrize("description", ["", "  "])
+def test_an_empty_screen_description_is_rejected(description: str) -> None:
+    with pytest.raises(ValueError, match="screen_description"):
+        Profile(
+            name="p",
+            output_type=Out,
+            instructions="read",
+            locate="full",
+            screen_description=description,
+        )
+
+
+def test_the_screen_description_does_not_change_the_fingerprint() -> None:
+    # It decides which images are read, not what is read from them.
+    base = Profile(name="p", output_type=Out, instructions="read", locate="full")
+    checked = Profile(
+        name="p", output_type=Out, instructions="read", locate="full", screen_description="a shop"
+    )
+
+    assert checked.fingerprint == base.fingerprint

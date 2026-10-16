@@ -123,6 +123,9 @@ class Profile[OutputT: BaseModel]:
         redact: Boxes painted opaque black before cropping, in whole-screen coordinates: a list
             for every orientation, or a mapping per orientation. Stored as a mapping with both
             orientations.
+        screen_description: What the target screen looks like, e.g. ``"a shop's item list"``.
+            When given, a shrunk copy of each cropped and redacted image is first checked against
+            it, and an image that shows another screen is recorded as skipped, not extracted.
         item_key: Returns the identity of one list item, e.g. ``lambda item: item.name``. It is
             applied to the items of the output's only ``list[SomeModel]`` field, and is used to
             match extracted items with the expected ones during evaluation.
@@ -135,6 +138,7 @@ class Profile[OutputT: BaseModel]:
     validators: Sequence[Validator[OutputT]] = field(default_factory=tuple)
     locate: Literal["full"] | Mapping[Orientation, Box]
     redact: Sequence[Box] | Mapping[Orientation, Sequence[Box]] = ()
+    screen_description: str | None = None
     item_key: Callable[[Any], Hashable] | None = None
 
     def __post_init__(self) -> None:
@@ -142,6 +146,8 @@ class Profile[OutputT: BaseModel]:
             raise ValueError("Profile.name must not be empty")
         if not self.version.strip():
             raise ValueError("Profile.version must not be empty")
+        if self.screen_description is not None and not self.screen_description.strip():
+            raise ValueError("Profile.screen_description must not be empty; use None for no check")
         if not (isinstance(self.output_type, type) and issubclass(self.output_type, BaseModel)):
             raise TypeError("Profile.output_type must be a pydantic BaseModel subclass")
         object.__setattr__(self, "validators", tuple(self.validators))
@@ -162,6 +168,8 @@ class Profile[OutputT: BaseModel]:
                 # What is sent changes with these, and so may what is read.
                 "locate": self.locate,
                 "redact": self.redact,
+                # screen_description is left out: it decides which images are read, not what is
+                # read from them.
             },
             sort_keys=True,
             ensure_ascii=False,

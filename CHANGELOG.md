@@ -14,11 +14,18 @@ All notable changes to this project are documented here. This project follows
   and the areas redacted
 - `framelift frames --profile` writes the images a run would send, and `frames` accepts images
 - Evaluation crops and redacts like a run
+- `Profile.screen_description`: each image is first checked against it, on the cropped and
+  redacted image shrunk to 512 pixels, and an image of another screen is recorded as
+  `status: "skipped"` without extraction; `Pipeline(screen_model=...)` and `run --screen-model`
+  choose the model for the check
+- `screen` in observations (the check's answer, model, usage and error) and `RunResult.skipped`;
+  `framelift run` reports skipped images
 
 ### Changed
 
 - Breaking: `Profile.locate` is required; pass `locate="full"` to keep sending the whole screen
-- Breaking: observations are `framelift/observation/v3` (adds `crop`)
+- Breaking: observations are `framelift/observation/v3` (adds `crop` and `screen`, and the
+  `skipped` status)
 - A screen whose orientation has no crop box is recorded as an error observation and not sent
 
 ## [0.2.0] - 2026-10-17
