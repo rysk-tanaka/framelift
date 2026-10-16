@@ -5,6 +5,8 @@ All notable changes to this project are documented here. This project follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-17
+
 ### Added
 
 - Video input (`framelift[video]`): videos are sampled (`--frame-rate`), split into still screens by
@@ -52,6 +54,7 @@ All notable changes to this project are documented here. This project follows
 - `framelift run` and `framelift synth` CLI commands
 - Synthetic fictional-shop sample generator
 
-[Unreleased]: https://github.com/rysk-tanaka/framelift/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/rysk-tanaka/framelift/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/rysk-tanaka/framelift/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/rysk-tanaka/framelift/compare/v0.0.1...v0.1.0
 [0.0.1]: https://github.com/rysk-tanaka/framelift/releases/tag/v0.0.1
