@@ -45,7 +45,7 @@ jobs:
       contents: write
     uses: rysk-tanaka/workflows/.github/workflows/release-on-version-change.yml@d7782d948c15ff4a2d2e452b86e8265c1eb98a94 # main
     with:
-      version_source: pyproject_toml
+      version_source: pyproject
       tag_prefix: v
       force_released_output: ${{ github.event_name == 'workflow_dispatch' }}
     secrets: inherit
