@@ -5,6 +5,26 @@ All notable changes to this project are documented here. This project follows
 
 ## [Unreleased]
 
+### Added
+
+- Video input (`framelift[video]`): videos are sampled (`--frame-rate`), split into still screens by
+  the share of the screen that changed (`--motion-threshold`), and the sharpest frame of each still
+  screen is read
+- `items.jsonl` and `RunResult.items`: list items merged across frames by `Profile.item_key`, by
+  majority vote, with ties left null and disagreements kept in `conflicts` (`framelift/item/v1`)
+- `Item` public record
+- `framelift frames` to see which video frames would be sent, without calling a model
+- `framelift synth --videos N` for synthetic scrolling videos
+
+### Changed
+
+- Breaking: observations are `framelift/observation/v2`; the perceptual hash moved from `source` to
+  the new `frame` (`index`, `timestamp_ms`, `sha256`, `phash`), which describes the image sent
+- An unreadable image or video (including one that cannot be opened) no longer stops
+  `Pipeline.run`: it is recorded as an error observation with `frame: null`, and frames read before
+  a video broke off are kept
+- numpy is now a direct dependency
+
 ## [0.1.0] - 2026-10-16
 
 ### Added

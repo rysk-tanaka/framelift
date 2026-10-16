@@ -403,6 +403,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "imagehash" },
+    { name = "numpy" },
     { name = "pillow" },
     { name = "pydantic" },
     { name = "pydantic-ai-slim" },
@@ -438,6 +439,7 @@ dev = [
 requires-dist = [
     { name = "av", marker = "extra == 'video'", specifier = ">=19" },
     { name = "imagehash", specifier = ">=4.3" },
+    { name = "numpy", specifier = ">=2" },
     { name = "pillow", specifier = ">=12" },
     { name = "pydantic", specifier = ">=2.14" },
     { name = "pydantic-ai-slim", specifier = ">=2.57" },

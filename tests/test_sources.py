@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from framelift._internal.sources import expand_inputs, load_image
+from framelift._internal.sources import expand_inputs, hash_file, load_image
 
 
 def test_expand_directory_glob_and_file_without_duplicates(samples: tuple[Path, list]) -> None:
@@ -49,3 +49,19 @@ def test_existing_paths_with_glob_characters_are_taken_literally(samples) -> Non
     literal = root / "shop[0].png"
     (root / truths[0].file).rename(literal)
     assert expand_inputs([literal]) == [literal]
+
+
+def test_expand_includes_videos(samples: tuple[Path, list]) -> None:
+    root, truths = samples
+    # Only the suffix matters for expansion; the video is decoded later.
+    (root / "recording.MP4").write_bytes(b"")
+    paths = expand_inputs([root])
+    assert [p.name for p in paths] == ["recording.MP4", *(t.file for t in truths)]
+    assert expand_inputs([str(root / "*.MP4")]) == [root / "recording.MP4"]
+
+
+def test_hash_file_matches_hashlib(tmp_path: Path) -> None:
+    path = tmp_path / "big.bin"
+    data = bytes(range(256)) * 10_000  # several chunks
+    path.write_bytes(data)
+    assert hash_file(path) == hashlib.sha256(data).hexdigest()

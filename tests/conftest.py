@@ -20,3 +20,12 @@ def samples(tmp_path: Path) -> tuple[Path, list[synth.SampleTruth]]:
     out = tmp_path / "samples"
     truths = synth.generate(out, n=3, seed=42)
     return out, truths
+
+
+@pytest.fixture
+def scrolling_video(tmp_path: Path) -> tuple[Path, synth.SampleVideo]:
+    """A synthetic video of a shop list that scrolls between still screens."""
+    pytest.importorskip("av")
+    path = tmp_path / "video" / "shop-scroll.mp4"
+    path.parent.mkdir()
+    return path, synth.generate_video(path, seed=7)

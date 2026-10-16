@@ -3,31 +3,33 @@
 Extract structured data from screen recordings and screenshots with vision LLMs.
 
 You describe **what** to read as a Pydantic model and **how** to read it as a `Profile`;
-framelift turns images into validated, provenance-tagged JSON Lines.
+framelift turns screenshots and screen recordings into validated, provenance-tagged JSON Lines.
 
 > **Status:** pre-alpha (0.x). The public API is limited to `Profile` and `Pipeline`
 > and may change between minor versions.
 
-## Features (0.1)
+## Features (0.2)
 
-- Image input (files, directories, glob patterns), each tagged with its SHA-256 and perceptual hash
+- Image and video input (files, directories, glob patterns), each tagged with its SHA-256
+- Videos are read once per still screen: frames are sampled, scrolling frames are skipped, and the
+  sharpest frame of each still screen is sent
 - Structured extraction with [Pydantic AI](https://ai.pydantic.dev/): your model is the output type,
   your validators trigger automatic retries
 - Model-agnostic: pass any `provider:model` string supported by Pydantic AI
-- `observations.jsonl` output with source, usage and retry information per image
-- A synthetic sample generator (a fictional shop screen) for demos and tests
-
+- `observations.jsonl` output with source, frame, usage and retry information per image or frame
+- `items.jsonl`: list items seen in several frames merged by majority vote, with disagreements kept
 - An evaluation harness built on [pydantic-evals](https://ai.pydantic.dev/evals/): score a profile
   and a model against images with expected outputs
+- A synthetic sample generator (a fictional shop screen, still or scrolling) for demos and tests
 
-Planned: video input with frame sampling and de-duplication (0.2), cross-frame aggregation (0.2),
-screen classification, cropping and redaction (0.3), and side-by-side comparison of models and
-prompts (0.3).
+Planned: screen classification, cropping and redaction, caching, and side-by-side comparison of
+models and prompts (0.3).
 
 ## Install
 
 ```bash
 pip install "framelift[anthropic]"   # or [openai], [google]
+pip install "framelift[video,anthropic]"   # to read screen recordings too
 ```
 
 ## Quick start
@@ -52,30 +54,74 @@ shop = Profile(
     version="1",
     output_type=ShopScreen,
     instructions="Read the shop's item list exactly as displayed.",
+    item_key=lambda item: item.name,  # merges the same item across frames
 )
 
-Pipeline(shop, model="anthropic:<model-name>", out_dir="out").run(["shots/*.png"])
+Pipeline(shop, model="anthropic:<model-name>", out_dir="out").run(["shots/*.png", "scroll.mp4"])
 ```
 
 Or from the command line:
 
 ```bash
-framelift synth --out samples --n 3                       # generate fictional shop screenshots
-framelift run "samples/*.png" --profile examples.fantasy_shop:profile \
+framelift synth --out samples --n 3 --videos 1   # fictional shop screenshots and a scrolling video
+framelift run samples --profile examples.fantasy_shop:profile \
   --model anthropic:<model-name> --out out
 ```
 
-Each line of `out/observations.jsonl` looks like:
+Each line of `out/observations.jsonl` is one image or video frame:
 
 ```json
-{"schema": "framelift/observation/v1",
+{"schema": "framelift/observation/v2",
+ "status": "ok",
  "profile": {"name": "fantasy-shop", "version": "1"},
- "source": {"path": "samples/shop-000.png", "sha256": "…", "phash": "…"},
+ "source": {"path": "samples/shop-scroll-000.mp4", "sha256": "…"},
+ "frame": {"index": 1, "timestamp_ms": 3000, "sha256": "…", "phash": "…"},
  "data": {"shop_name": "…", "items": [{"name": "…", "price": 120}]},
+ "error": null,
  "model": "anthropic:<model-name>",
  "usage": {"input_tokens": 1534, "output_tokens": 96, "requests": 1, "latency_ms": 2104},
  "retries": 0}
 ```
+
+For a video, `frame.timestamp_ms` counts from the start of the stream. For an image,
+`frame.index` is 0, `frame.timestamp_ms` is null and `frame.sha256` is the image's.
+An input that cannot be read, or a video that breaks off partway, is recorded as an observation
+with `"status": "error"` and `"frame": null` (and `"source.sha256": null` when the file itself
+cannot be opened), and the run goes on with the next input.
+
+## Videos and merged items
+
+A video is sampled 4 times per second (`--frame-rate`). Samples that barely differ from their
+neighbour and from the first sample of their run form a still screen: at most 5% of the screen
+may change (`--motion-threshold`, the share of 16x16 tiles of a grayscale copy that changed).
+Counting changed tiles catches a page or a list that changes only its text, and ignores a small
+animation such as a clock. Only the sharpest sample of each still screen is sent to the model, so
+scrolling frames are not read (a video that never stands still is read once, from its sharpest
+sample). A screen shown for less than about two samples can be missed, and so can the screens
+passed during a slow scroll that never stops: pause on each screen you want read.
+To see which frames would be sent, without calling a model:
+
+```bash
+framelift frames samples/shop-scroll-000.mp4 --out frames
+```
+
+With `Profile.item_key`, items of the output's list field are merged across all frames of a run
+into `out/items.jsonl`:
+
+```json
+{"schema": "framelift/item/v1", "key": "Moon Herb",
+ "data": {"name": "Moon Herb", "price": 120}, "votes": 3,
+ "conflicts": [{"field": "price", "values": [{"value": 120, "votes": 2}, {"value": 12, "votes": 1}]}],
+ "evidence": [{"source_sha256": "…", "frame_index": 0, "timestamp_ms": 800},
+              {"source_sha256": "…", "frame_index": 1, "timestamp_ms": 3000},
+              {"source_sha256": "…", "frame_index": 2, "timestamp_ms": 5300}]}
+```
+
+Each field takes the value most frames agree on. On a tie the field is null rather than guessed,
+and every field the frames disagreed on is listed in `conflicts`. Items are written the way the
+output model serializes them, as in `observations.jsonl`. If a model error stops the run, the
+items read until then are still written before the error is raised. `Item.data` is plain JSON,
+not validated against the output model, so a required field can be null after a tie.
 
 ## Evaluate
 
@@ -117,7 +163,8 @@ list-item precision and recall (items are matched with `Profile.item_key`, e.g.
 
 ## Privacy
 
-framelift runs locally and only sends the images you pass to the model provider you choose.
+framelift runs locally and only sends the images you pass, and the frames it picks from your
+videos, to the model provider you choose.
 It has no telemetry. Cropping and redaction before sending are planned for 0.3.
 
 ## Development
