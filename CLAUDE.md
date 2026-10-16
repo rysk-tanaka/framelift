@@ -70,6 +70,8 @@ Pipeline.run(inputs)
 
 ## 今後の予定
 
+設計の詳細と判断の理由は [docs/README.md](docs/README.md) から辿れる。
+
 - 0.1 — 評価ハーネス（`pydantic-evals` 上に、画像と正解のデータセット形式、項目単位の評価器）
 - 0.2 — 動画入力（PyAV）、一定間隔の抽出と pHash による重複除去、`item_key` による複数フレームの集約と `items.jsonl`、合成動画
 - 0.3 — 画面判定、切り出し（`full`・`fixed`・`model`）とマスク、抽出結果のキャッシュ、設定の総当たり比較
