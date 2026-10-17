@@ -8,7 +8,7 @@ framelift turns screenshots and screen recordings into validated, provenance-tag
 > **Status:** pre-alpha (0.x). The public API is limited to `Profile` and `Pipeline`
 > and may change between minor versions.
 
-## Features (0.2)
+## Features (0.3)
 
 - Image and video input (files, directories, glob patterns), each tagged with its SHA-256
 - Videos are read once per still screen: frames are sampled, scrolling frames are skipped, and the
