@@ -5,6 +5,15 @@ All notable changes to this project are documented here. This project follows
 
 ## [Unreleased]
 
+### Changed
+
+- Still screens of a video are told apart, and their sharpest sample picked, on the part of the
+  screen that is sent: cropped to `locate`, with `redact` blacked out. Movement elsewhere, such as
+  a character's idle animation beside the list being read, no longer splits a still screen and
+  sends the same list again; a video may yield other frames than with 0.4.0
+- `framelift frames --profile` picks frames the same way, so it still writes the frames `run`
+  sends
+
 ## [0.4.0] - 2026-10-17
 
 ### Added

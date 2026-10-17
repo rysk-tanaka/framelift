@@ -9,6 +9,13 @@ switch), and ignores a small animation such as a clock or an effect in one corne
 Each still segment contributes its sharpest sample, so samples taken while the screen moves are
 not sent; only a video that never stands still is read once, from its sharpest sample.
 
+Given a `Layout`, movement and sharpness are measured on the part of the screen that is sent, so
+that movement elsewhere (a character's idle animation beside the list being read) does not split
+a still screen. Tiles mostly redacted are left out of the share that changed, so a wide redaction
+does not hide the change in the rest, and the sharpness leaves out the edges of redactions. A
+small crop is shrunk less, never enlarged, so that a tile keeps the pixels the threshold was
+measured with.
+
 Each sample is the frame on screen at a sampling instant, so a variable-frame-rate recording that
 encodes a still screen as one long frame counts as one sample per instant it was shown.
 
@@ -26,7 +33,7 @@ import imagehash
 import numpy as np
 from PIL import Image
 
-from framelift._internal.layout import encode_png
+from framelift._internal.layout import NoCropError, encode_png
 from framelift._internal.sources import ImageSource, UnreadableInputError, error_reason
 
 if TYPE_CHECKING:
@@ -41,21 +48,25 @@ DEFAULT_FRAME_RATE = 4.0
 DEFAULT_MOTION_THRESHOLD = 0.05
 MIN_STILL_SAMPLES = 2
 
-# A sample is shrunk to _DIFF_SIZE and split into _TILES x _TILES tiles; a tile changed when its
-# mean absolute difference (0-255) exceeds _TILE_CHANGE. Measured on the synthetic shop screen,
-# scrolling by whole rows or swapping the page changes 10% of the tiles or more, while codec
-# noise, a small animation and one changed row stay below 2%.
-_DIFF_SIZE = (256, 256)
+# A sample is shrunk to at most _DIFF_SIZE pixels a side and split into _TILES x _TILES tiles; a
+# tile changed when its mean absolute difference (0-255) exceeds _TILE_CHANGE. Measured on the
+# synthetic shop screen, scrolling by whole rows or swapping the page changes 10% of the tiles or
+# more, while codec noise, a small animation and one changed row stay below 2%.
+_DIFF_SIZE = 256
 _TILES = 16
 _TILE_CHANGE = 3.0
+# A tile at least this much redacted is left out of the share of tiles that changed.
+_TILE_SHOWN = 0.5
 # Sampling instants are computed in floating point; without a tolerance, 0.1 + 0.1 + 0.1 lands
 # just after a frame at 0.3 s and the instant would be credited to the frame before it.
 _TIME_TOLERANCE = 1e-6
-_TRANSPOSE = {
-    90: Image.Transpose.ROTATE_90,
-    180: Image.Transpose.ROTATE_180,
-    270: Image.Transpose.ROTATE_270,
-}
+# Indexed by counterclockwise quarter turns (see _quarter_turns).
+_TRANSPOSE = (
+    None,
+    Image.Transpose.ROTATE_90,
+    Image.Transpose.ROTATE_180,
+    Image.Transpose.ROTATE_270,
+)
 
 
 @dataclass(frozen=True)
@@ -132,9 +143,16 @@ def frame_time(time: float | None, number: int, rates: Iterable[Any]) -> float |
     return None
 
 
+def _quarter_turns(rotation: float) -> int:
+    """A display rotation (counterclockwise degrees, as PyAV reports it) as counterclockwise
+    quarter turns, 0-3; 0 for an angle that is not a quarter turn."""
+    degrees = round(rotation) % 360
+    return degrees // 90 if degrees % 90 == 0 else 0
+
+
 def upright(image: Image.Image, rotation: float) -> Image.Image:
     """Apply a video's display rotation (counterclockwise degrees, as PyAV reports it)."""
-    transpose = _TRANSPOSE.get(round(rotation) % 360)
+    transpose = _TRANSPOSE[_quarter_turns(rotation)]
     return image.transpose(transpose) if transpose is not None else image
 
 
@@ -151,38 +169,91 @@ def ticks_before(next_time: float, time: float, step: float) -> int:
     return math.ceil(span / step - 1e-9)
 
 
-def _difference(a: NDArray[np.float32], b: NDArray[np.float32]) -> float:
-    """The share of tiles (0-1) that changed between two small grayscale copies."""
-    size = _DIFF_SIZE[0] // _TILES
-    tiles = np.abs(a - b).reshape(_TILES, size, _TILES, size).mean(axis=(1, 3))
-    return float((tiles > _TILE_CHANGE).mean())
+def _diff_size(width: int, height: int) -> tuple[int, int]:
+    """The size a sample is shrunk to: at most _DIFF_SIZE a side, never enlarged, and a multiple
+    of _TILES, so that a small crop keeps the pixels per tile that _TILE_CHANGE was measured
+    with instead of being stretched."""
+
+    def side(length: int) -> int:
+        return max(_TILES, min(_DIFF_SIZE, length // _TILES * _TILES))
+
+    return side(width), side(height)
 
 
-def _laplacian_variance(gray: NDArray[np.float32]) -> float:
-    """Variance of the Laplacian: higher for sharper images, low for motion blur."""
+def _tiles(values: NDArray[np.float32]) -> NDArray[np.float32]:
+    """The sum of ``values`` in each of the _TILES x _TILES tiles."""
+    height, width = values.shape
+    return values.reshape(_TILES, height // _TILES, _TILES, width // _TILES).sum(axis=(1, 3))
+
+
+def _difference(a: _Sample, b: _Sample) -> float:
+    """The share of tiles (0-1) that changed between two samples, among the tiles mostly not
+    redacted; 1 for samples of different sizes, as after the screen turned."""
+    if a.small.shape != b.small.shape:
+        return 1.0
+    if a.shown is None:
+        height, width = a.small.shape
+        means = _tiles(np.abs(a.small - b.small)) / (height * width / _TILES**2)
+        return float((means > _TILE_CHANGE).mean())
+    # The redacted parts are black in both, and must not dilute a tile's change.
+    weight = _tiles(a.shown)
+    counted = weight >= _TILE_SHOWN * a.shown.size / _TILES**2
+    if not counted.any():
+        return 0.0
+    means = _tiles(np.abs(a.small - b.small) * a.shown) / np.maximum(weight, 1e-9)
+    return float((means > _TILE_CHANGE)[counted].mean())
+
+
+def _laplacian_variance(gray: NDArray[np.float32], shown: NDArray[np.bool_] | None) -> float:
+    """Variance of the Laplacian: higher for sharper images, low for motion blur.
+
+    Only pixels whose Laplacian sees no redacted pixel count, so that the edges of a redaction
+    do not swamp the difference between a sharp and a blurred sample; 0 when no pixel counts,
+    as in a crop less than 3 pixels high or wide.
+    """
+    # The Laplacian needs a pixel on each side.
+    if min(gray.shape) < 3:
+        return 0.0
     laplacian = (
         gray[:-2, 1:-1] + gray[2:, 1:-1] + gray[1:-1, :-2] + gray[1:-1, 2:] - 4 * gray[1:-1, 1:-1]
     )
-    return float(laplacian.var())
+    if shown is None:
+        return float(laplacian.var())
+    clear = (
+        shown[:-2, 1:-1] & shown[2:, 1:-1] & shown[1:-1, :-2] & shown[1:-1, 2:] & shown[1:-1, 1:-1]
+    )
+    return float(laplacian[clear].var()) if clear.any() else 0.0
 
 
 @dataclass(frozen=True)
 class _Sample:
     timestamp_ms: int
     small: NDArray[np.float32]
+    shown: NDArray[np.float32] | None
+    """How much of each pixel of ``small`` is not redacted (0-1); ``None`` when none is."""
     sharpness: float
     render: Callable[[], Image.Image]
     """Builds the full, upright color image; called only for a sample that is picked."""
 
     @classmethod
     def of_gray(
-        cls, gray: NDArray[np.uint8], time: float, render: Callable[[], Image.Image]
+        cls,
+        gray: NDArray[np.uint8],
+        time: float,
+        render: Callable[[], Image.Image],
+        shown: NDArray[np.bool_] | None = None,
     ) -> _Sample:
         # One grayscale array serves both the movement check and the sharpness.
-        small_image = Image.fromarray(gray).resize(_DIFF_SIZE, Image.Resampling.BILINEAR)
+        height, width = gray.shape
+        size = _diff_size(width, height)
+        small_image = Image.fromarray(gray).resize(size, Image.Resampling.BILINEAR)
         small = np.asarray(small_image, dtype=np.float32)
-        sharp = _laplacian_variance(gray.astype(np.float32))
-        return cls(round(time * 1000), small, sharp, render)
+        small_shown = None
+        if shown is not None:
+            mask = Image.fromarray(shown.astype(np.float32), mode="F")
+            small_shown = np.asarray(mask.resize(size, Image.Resampling.BILINEAR))
+        sharp = _laplacian_variance(gray.astype(np.float32), shown)
+        return cls(round(time * 1000), small, small_shown, sharp, render)
 
     @classmethod
     def of(cls, image: Image.Image, time: float) -> _Sample:
@@ -200,8 +271,8 @@ class _Segmenter:
     def __init__(self, motion_threshold: float, min_still_samples: int) -> None:
         self._threshold = motion_threshold
         self._min_samples = min_still_samples
-        self._first: NDArray[np.float32] | None = None
-        self._previous: NDArray[np.float32] | None = None
+        self._first: _Sample | None = None
+        self._previous: _Sample | None = None
         self._best: _Sample | None = None
         self._count = 0
         self._fallback: _Sample | None = None
@@ -213,15 +284,15 @@ class _Segmenter:
             # Comparing with the segment's first sample too catches slow scrolling, which moves
             # little between samples but replaces the whole screen over time.
             moved = (
-                _difference(sample.small, self._previous) > self._threshold
-                or _difference(sample.small, self._first) > self._threshold
+                _difference(sample, self._previous) > self._threshold
+                or _difference(sample, self._first) > self._threshold
             )
             if moved:
                 yield from self._close()
         if self._count == 0:
-            self._first = sample.small
+            self._first = sample
         self._count += repeats
-        self._previous = sample.small
+        self._previous = sample
         if self._best is None or sample.sharpness > self._best.sharpness:
             self._best = sample
         if self._emitted == 0 and (
@@ -261,6 +332,7 @@ def sample_video(
     frame_rate: float = DEFAULT_FRAME_RATE,
     motion_threshold: float = DEFAULT_MOTION_THRESHOLD,
     min_still_samples: int = MIN_STILL_SAMPLES,
+    layout: Layout | None = None,
 ) -> Generator[VideoFrame, None, None]:
     """Yield the sharpest frame of every still segment of a video, in order.
 
@@ -269,7 +341,9 @@ def sample_video(
     ``motion_threshold`` of the screen (the share of 16x16 tiles, 0-1) changed. Segments
     with fewer than ``min_still_samples`` samples are movement and are dropped, so a screen shown
     for less than about ``min_still_samples / frame_rate`` seconds can be missed. A video with no
-    still segment yields its sharpest sample.
+    still segment yields its sharpest sample. With a ``layout``, both are measured on the part of
+    the screen it sends: the share counts only tiles mostly not redacted, and the sharpness only
+    pixels clear of redactions. The frames yielded are still whole screens.
 
     Raises `MissingVideoExtraError` without PyAV and `UnreadableInputError` (a `ValueError`) for
     unreadable videos.
@@ -308,7 +382,7 @@ def sample_video(
                     repeats = ticks_before(next_time, time, step)
                     if repeats:
                         next_time += repeats * step
-                        yield from segmenter.add(_to_sample(*shown), repeats)
+                        yield from segmenter.add(_to_sample(*shown, layout), repeats)
                 shown = (frame, time)
             if shown is None or next_time is None:
                 raise UnreadableInputError("video", path, "no frames")
@@ -323,7 +397,7 @@ def sample_video(
             else:
                 repeats = 1 if next_time <= last_time + _TIME_TOLERANCE else 0
             if repeats:
-                yield from segmenter.add(_to_sample(last_frame, last_time), repeats)
+                yield from segmenter.add(_to_sample(last_frame, last_time, layout), repeats)
             # Inside the try: the last segment's frame is converted to color here.
             yield from segmenter.finish()
         except av.error.FFmpegError as exc:
@@ -357,13 +431,35 @@ def _end_time(
     return None
 
 
-def _to_sample(frame: Any, time: float) -> _Sample:
+def _to_sample(frame: Any, time: float, layout: Layout | None) -> _Sample:
     # Movement and sharpness need only the luma plane, at full size but without converting to
-    # RGB or rotating: every sample of a stream has the same rotation, and the Laplacian's
-    # variance does not change under a quarter turn. The color image is built only for the
-    # samples that are sent.
+    # RGB: the color image is built only for the samples that are sent.
     gray = frame.to_ndarray(format="gray")
-    return _Sample.of_gray(gray, time, lambda: upright(frame.to_image(), frame.rotation))
+
+    def render() -> Image.Image:
+        return upright(frame.to_image(), frame.rotation)
+
+    if layout is not None and not layout.is_identity:
+        visible, shown = _visible(gray, frame.rotation, layout)
+        return _Sample.of_gray(visible, time, render, shown)
+    # Without a layout the plane is not even turned upright: every sample of a stream has the
+    # same rotation, and the Laplacian's variance does not change under a quarter turn.
+    return _Sample.of_gray(gray, time, render)
+
+
+def _visible(
+    gray: NDArray[np.uint8], rotation: float, layout: Layout
+) -> tuple[NDArray[np.uint8], NDArray[np.bool_] | None]:
+    """The part of a luma plane that ``layout`` sends, turned upright first, as its boxes are,
+    and which of its pixels are not redacted."""
+    # Counterclockwise quarter turns, as upright turns the color image.
+    gray = np.rot90(gray, k=_quarter_turns(rotation))
+    try:
+        visible, shown = layout.visible(gray)
+    except NoCropError:
+        # The whole screen, then; frame_to_source reports the picked frame as uncropped.
+        return np.ascontiguousarray(gray), None
+    return np.ascontiguousarray(visible), shown
 
 
 def frame_to_source(

@@ -3,6 +3,7 @@ from __future__ import annotations
 import itertools
 import random
 import sys
+import warnings
 from collections.abc import Iterator
 from fractions import Fraction
 from pathlib import Path
@@ -15,6 +16,7 @@ import pytest
 from PIL import Image, ImageDraw
 
 from framelift._internal import synth, video
+from framelift._internal.layout import Layout
 
 pytest.importorskip("av")
 
@@ -71,7 +73,7 @@ def test_a_slow_scroll_does_not_merge_the_screens_around_it(tmp_path: Path) -> N
     frames = list(video.sample_video(path))
 
     def difference(a: Image.Image, b: Image.Image) -> float:
-        return video._difference(video._Sample.of(a, 0).small, video._Sample.of(b, 0).small)
+        return video._difference(video._Sample.of(a, 0), video._Sample.of(b, 0))
 
     threshold = video.DEFAULT_MOTION_THRESHOLD
     # The first and last frames show the screens before and after the scroll; one segment
@@ -231,6 +233,141 @@ def test_a_small_animation_does_not_split_a_still_screen(tmp_path: Path) -> None
     synth.write_video(path, frames, fps=FPS)
 
     assert len(list(video.sample_video(path))) == 1
+
+
+def _beside_a_figure(screen: Image.Image, box: tuple[float, float, float, float]) -> list:
+    """The screen with a large block in ``box`` (fractions) that jumps every 0.8 s, like a
+    character's idle animation next to the list being read."""
+    width, height = screen.size
+    left, top, right, bottom = box
+    frames = []
+    for i in range(32):
+        frame = screen.copy()
+        x = left * width + (i // 8) * (right - left) * width / 5
+        block = (x, top * height, x + (right - left) * width / 5 * 2, bottom * height)
+        ImageDraw.Draw(frame).rectangle(block, fill=(240, 200, 40))
+        frames.append(frame)
+    return frames
+
+
+def test_movement_outside_the_crop_does_not_split_a_still_screen(tmp_path: Path) -> None:
+    path = tmp_path / "figure.mp4"
+    synth.write_video(path, _beside_a_figure(_view().render(0), (0.0, 0.0, 0.4, 1.0)), fps=FPS)
+    beside = Layout(locate={"landscape": (0.4, 0.0, 1.0, 1.0)}, redact={})
+
+    assert len(list(video.sample_video(path))) == 4
+    (frame,) = video.sample_video(path, layout=beside)
+    assert frame.image.size == (1280, 720)  # whole screens are yielded, cropped later
+
+
+def test_movement_under_a_redaction_does_not_split_a_still_screen(tmp_path: Path) -> None:
+    path = tmp_path / "figure.mp4"
+    synth.write_video(path, _beside_a_figure(_view().render(0), (0.0, 0.0, 0.4, 1.0)), fps=FPS)
+    covered = Layout(locate="full", redact={"landscape": ((0.0, 0.0, 0.4, 1.0),)})
+
+    assert len(list(video.sample_video(path, layout=covered))) == 1
+
+
+def test_a_layout_without_a_box_for_the_screen_compares_whole_screens(tmp_path: Path) -> None:
+    path = tmp_path / "figure.mp4"
+    synth.write_video(path, _beside_a_figure(_view().render(0), (0.0, 0.0, 0.4, 1.0)), fps=FPS)
+    portrait_only = Layout(locate={"portrait": (0.4, 0.0, 1.0, 1.0)}, redact={})
+
+    assert len(list(video.sample_video(path, layout=portrait_only))) == 4
+
+
+@pytest.mark.parametrize(
+    ("rotation", "box", "count"),
+    [
+        (90, (0.0, 0.5, 1.0, 1.0), 1),
+        (90, (0.0, 0.0, 1.0, 0.5), 4),
+        (270, (0.0, 0.5, 1.0, 1.0), 1),
+        (270, (0.0, 0.0, 1.0, 0.5), 4),
+        (180, (0.0, 0.5, 1.0, 1.0), 1),
+        (180, (0.0, 0.0, 1.0, 0.5), 4),
+    ],
+)
+def test_the_crop_is_found_on_the_upright_screen(
+    tmp_path: Path, rotation: int, box: tuple[float, float, float, float], count: int
+) -> None:
+    # The figure moves in the top half of the upright screen.
+    size = (640, 360) if rotation == 180 else (360, 640)
+    upright = _view().render(0).resize(size)
+    path = tmp_path / "rotated.mp4"
+    # Stored turned clockwise by the rotation, and shown upright by turning it back.
+    turn_back = {
+        90: Image.Transpose.ROTATE_270,
+        180: Image.Transpose.ROTATE_180,
+        270: Image.Transpose.ROTATE_90,
+    }
+    stored = [
+        frame.transpose(turn_back[rotation])
+        for frame in _beside_a_figure(upright, (0.0, 0.0, 1.0, 0.45))
+    ]
+    synth.write_video(path, stored, fps=FPS, rotation=rotation)
+    orientation = "landscape" if rotation == 180 else "portrait"
+    layout = Layout(locate={orientation: box}, redact={})
+
+    assert len(list(video.sample_video(path, layout=layout))) == count
+
+
+def _corner_pages() -> list[Image.Image]:
+    """A still screen whose bottom-right corner shows one page of text, then another."""
+    frames = []
+    for seed in (5, 6):
+        page = _view().render(0)
+        draw = ImageDraw.Draw(page)
+        draw.rectangle((960, 648, 1280, 720), fill=(255, 255, 255))
+        pick = random.Random(seed)
+        for row in range(3):
+            for column in range(12):
+                if pick.random() < 0.5:
+                    x, y = 970 + column * 25, 655 + row * 20
+                    draw.rectangle((x, y, x + 18, y + 12), fill=(0, 0, 0))
+        frames += [page] * 15
+    return frames
+
+
+def test_a_change_beside_a_wide_redaction_is_still_a_new_screen(tmp_path: Path) -> None:
+    path = tmp_path / "corner.mp4"
+    synth.write_video(path, _corner_pages(), fps=FPS)
+    # All but the corner is redacted: its tiles alone tell whether the screen moved.
+    corner_only = Layout(
+        locate="full",
+        redact={"landscape": ((0.0, 0.0, 1.0, 0.9), (0.0, 0.9, 0.75, 1.0))},
+    )
+
+    assert len(list(video.sample_video(path, layout=corner_only))) == 2
+
+
+def _render() -> Image.Image:
+    return Image.new("L", (1, 1))
+
+
+def test_a_small_crop_is_not_enlarged_for_the_movement_check() -> None:
+    band = video._Sample.of_gray(np.zeros((72, 1280), dtype=np.uint8), 0, _render)
+    screen = video._Sample.of_gray(np.zeros((720, 1280), dtype=np.uint8), 0, _render)
+
+    assert band.small.shape == (64, 256)
+    assert screen.small.shape == (256, 256)
+
+
+def test_a_crop_too_thin_for_the_laplacian_has_no_sharpness() -> None:
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        sample = video._Sample.of_gray(np.full((1, 100), 128, dtype=np.uint8), 0, _render)
+
+    assert sample.sharpness == 0
+
+
+def test_the_edges_of_a_redaction_do_not_count_as_sharpness() -> None:
+    gray = np.full((100, 100), 128, dtype=np.uint8)
+    gray[20:60, 20:60] = 0
+    shown = np.ones(gray.shape, dtype=np.bool_)
+    shown[20:60, 20:60] = False
+
+    assert video._Sample.of_gray(gray, 0, _render).sharpness > 0
+    assert video._Sample.of_gray(gray, 0, _render, shown).sharpness == 0
 
 
 @pytest.mark.parametrize(
