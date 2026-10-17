@@ -273,8 +273,14 @@ uv run ty check
 uv run pytest
 ```
 
-Tests never call a real model (`ALLOW_MODEL_REQUESTS = False`); tests marked `live` are skipped by
-default.
+Only the tests marked `live` call a real model; the others cannot (`ALLOW_MODEL_REQUESTS = False`).
+The `live` tests are left out by default (`-m "not live"`). To run them, name the model in
+`FRAMELIFT_LIVE_MODEL` and set the provider's API key. They read a few synthetic screens, so the
+provider bills for them.
+
+```bash
+FRAMELIFT_LIVE_MODEL=anthropic:<model-name> uv run pytest -m live
+```
 
 ## License
 

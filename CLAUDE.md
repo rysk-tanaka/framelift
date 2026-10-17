@@ -25,7 +25,7 @@ uv run ty check
 uv run pytest                          # 全テスト（live マーカーは除外）
 uv run pytest tests/test_pipeline.py   # 特定ファイル
 uv run pytest -k retry                 # 特定テスト
-uv run pytest -m live                  # 実モデルを呼ぶテスト（API キーが必要）
+FRAMELIFT_LIVE_MODEL=anthropic:<model-name> uv run pytest -m live   # 実モデルを呼ぶテスト（API キーが必要、課金される。変数がなければ skip）
 
 # CLI の動作確認（"test" は Pydantic AI 組み込みの、プロバイダを呼ばないモデル）
 uv run framelift synth --out /tmp/samples --n 3 --videos 1
@@ -121,7 +121,7 @@ framelift eval（framelift[eval] が必要）
 
 ### テスト
 
-- 実モデルは呼ばない。`tests/conftest.py` で `models.ALLOW_MODEL_REQUESTS = False` にしている
+- `live` マーカーのテスト（`tests/test_live.py`）以外は実モデルを呼ばない。`tests/conftest.py` で `models.ALLOW_MODEL_REQUESTS = False` にしていて、live テストだけがテストの中で `True` に戻す
 - モデルの応答は `FunctionModel` で組み立てる。出力はツール呼び出しなので、`ToolCallPart(info.output_tools[0].name, {...})` で返す
 - 再試行の確認は、1 回目に検証を通らない値、2 回目に正しい値を返す `FunctionModel` で行う
 - CLI のテストは `--model test`（Pydantic AI 組み込みのテスト用モデル）と `typer.testing.CliRunner` を使う
