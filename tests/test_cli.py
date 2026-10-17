@@ -137,6 +137,46 @@ def test_synth_then_eval_with_the_test_model(
     assert "FieldAccuracy" in result.output
 
 
+def test_degraded_synth_then_run_and_eval_with_the_test_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(Path(__file__).resolve().parents[1])
+    samples, out = tmp_path / "samples", tmp_path / "out"
+    degrade = ["--scale", "0.5", "--noise", "8", "--jpeg-quality", "70"]
+    synth = runner.invoke(app, ["synth", "--out", str(samples), "--n", "2", *degrade])
+    assert synth.exit_code == 0, synth.output
+    assert sorted(p.name for p in samples.iterdir()) == [
+        "dataset.yaml",
+        "shop-000.jpg",
+        "shop-001.jpg",
+    ]
+
+    profile = ["--profile", "examples.fantasy_shop:profile", "--model", "test"]
+    result = runner.invoke(app, ["run", str(samples), *profile, "--out", str(out)])
+    assert result.exit_code == 0, result.output
+    lines = (out / "observations.jsonl").read_text().splitlines()
+    assert [Observation.model_validate_json(line).status for line in lines] == ["ok", "ok"]
+
+    result = runner.invoke(app, ["eval", str(samples / "dataset.yaml"), *profile])
+    assert result.exit_code == 0, result.output
+
+
+@pytest.mark.parametrize(
+    "option",
+    [
+        ["--scale", "0"],
+        ["--scale", "nan"],
+        ["--noise", "nan"],
+        ["--noise", "65"],
+        ["--jpeg-quality", "0"],
+    ],
+)
+def test_synth_rejects_out_of_range_degradation(tmp_path: Path, option: list[str]) -> None:
+    result = runner.invoke(app, ["synth", "--out", str(tmp_path / "samples"), "--n", "1", *option])
+    assert result.exit_code == 2
+    assert not (tmp_path / "samples").exists()
+
+
 def test_eval_rejects_a_dataset_that_does_not_match_its_images(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

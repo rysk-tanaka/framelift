@@ -105,6 +105,14 @@ def _checked(check: Callable[[float], float]) -> Callable[[float], float]:
     return callback
 
 
+def _checked_jpeg_quality(value: int | None) -> int | None:
+    """`_checked` for ``--jpeg-quality``, whose value is an int or None."""
+    try:
+        return _synth.check_jpeg_quality(value)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
 FrameRate = Annotated[
     float,
     typer.Option(
@@ -344,10 +352,35 @@ def synth(
         int, typer.Option(min=0, help="Number of scrolling videos (needs the video extra)")
     ] = 0,
     seed: Annotated[int, typer.Option(help="Random seed")] = 0,
+    scale: Annotated[
+        float,
+        typer.Option(
+            callback=_checked(_synth.check_scale),
+            help=f"Resize the screenshots by this ({_synth.MIN_SCALE:g}-{_synth.MAX_SCALE:g})",
+        ),
+    ] = _synth.DEFAULT_SCALE,
+    noise: Annotated[
+        float,
+        typer.Option(
+            callback=_checked(_synth.check_noise),
+            help="Standard deviation of the Gaussian noise added to the screenshots, in 0-255 "
+            f"pixel values (0-{_synth.MAX_NOISE:g})",
+        ),
+    ] = _synth.DEFAULT_NOISE,
+    jpeg_quality: Annotated[
+        int | None,
+        typer.Option(
+            callback=_checked_jpeg_quality,
+            help="Save the screenshots as JPEG of this quality "
+            f"({_synth.MIN_JPEG_QUALITY}-{_synth.MAX_JPEG_QUALITY})",
+        ),
+    ] = None,
 ) -> None:
     """Generate screenshots of a fictional shop, with ground truth in dataset.yaml, and
     optionally videos of its list scrolling."""
-    truths = _synth.generate(out, n=n, seed=seed)
+    truths = _synth.generate(
+        out, n=n, seed=seed, scale=scale, noise=noise, jpeg_quality=jpeg_quality
+    )
     typer.echo(f"wrote {len(truths)} images and {_synth.DATASET_FILE} to {out}", err=True)
     try:
         for index in range(videos):
