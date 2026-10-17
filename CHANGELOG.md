@@ -5,6 +5,8 @@ All notable changes to this project are documented here. This project follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-17
+
 ### Added
 
 - `framelift synth --scale`, `--noise` and `--jpeg-quality` resize the screenshots, add Gaussian
@@ -119,7 +121,8 @@ All notable changes to this project are documented here. This project follows
 - `framelift run` and `framelift synth` CLI commands
 - Synthetic fictional-shop sample generator
 
-[Unreleased]: https://github.com/rysk-tanaka/framelift/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/rysk-tanaka/framelift/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/rysk-tanaka/framelift/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/rysk-tanaka/framelift/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/rysk-tanaka/framelift/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/rysk-tanaka/framelift/compare/v0.0.1...v0.1.0
