@@ -58,7 +58,7 @@ framelift run recording.mp4 --profile myprofiles:shop --model anthropic:<model> 
 | `instructions` | 読み方の指示 | 0.0.1 |
 | `validators` | 出力を検査し、問題があれば `ModelRetry` を投げる関数。Pydantic AI の出力検証に登録し、再試行させる | 0.0.1 |
 | `version` | 指示やモデル定義を変えたら上げる。キャッシュと評価結果の識別に使う | 0.0.1 |
-| `item_key` | 一覧の各項目を同一視するキー。評価で正解の項目と対応付けるのと、複数フレームの集約に使う。`output_type` のトップレベルにある、ただ 1 つの `list[モデル]`（`| None` も可）型のフィールドの要素に適用する | 0.1 |
+| `item_key` | 一覧の各項目を同一視するキー。評価で正解の項目と対応付けるのと、複数フレームの集約に使う。`output_type` のトップレベルにある、ただ 1 つの `list[モデル]`（`\| None` も可）型のフィールドの要素に適用する | 0.1 |
 | `screen_description` | 対象画面の説明（画面判定に使う） | 0.3 |
 | `locate` / `redact` | 送る範囲（必須）と、送る前に塗りつぶす領域 | 0.3 |
 
