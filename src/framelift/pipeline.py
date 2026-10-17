@@ -12,7 +12,7 @@ from pydantic import BaseModel
 
 from framelift._internal.aggregate import Aggregator
 from framelift._internal.cache import Cache
-from framelift._internal.extract import Extractor
+from framelift._internal.extract import Extractor, ModelMismatchError, note_input
 from framelift._internal.items import item_keyer
 from framelift._internal.layout import Layout, NoCropError
 from framelift._internal.screen import ScreenClassifier
@@ -130,6 +130,11 @@ class Pipeline[OutputT: BaseModel]:
         cache_dir: Where to cache extractions and screen checks, so that images read before
             are not paid for again. ``None`` caches nothing. Only models given as strings are
             cached; see `Profile.version` for when to bump it so that old entries are not used.
+
+    Raises:
+        UserError: From Pydantic AI, when a model string cannot be resolved, e.g. as the
+            provider's API key is not set. `run` raises one when a local server answers with
+            another model than the one asked for.
     """
 
     def __init__(
@@ -249,23 +254,27 @@ class Pipeline[OutputT: BaseModel]:
             )
             output = None
         else:
-            screen = None if self._classifier is None else self._classifier.classify(image)
-            if screen is not None and screen.is_target is not True:
-                # Another screen, or one the check could not tell: nothing is guessed at.
-                observation = self._extractor.screened_out(
-                    image, screen, anonymize_paths=self.anonymize_paths
-                )
-                output = None
-            else:
-                observation, output = self._extractor.observe(
-                    image, anonymize_paths=self.anonymize_paths, screen=screen
-                )
+            try:
+                observation, output = self._read(image)
+            except ModelMismatchError as exc:
+                note_input(exc, image, anonymize_paths=self.anonymize_paths)
+                raise
         result.observations.append(observation)
         if aggregator is not None:
             aggregator.add(observation, output)
         if writer is not None:
             writer.write(observation.to_json() + "\n")
             writer.flush()
+
+    def _read(self, image: ImageSource) -> tuple[Observation, BaseModel | None]:
+        screen = None if self._classifier is None else self._classifier.classify(image)
+        if screen is not None and screen.is_target is not True:
+            # Another screen, or one the check could not tell: nothing is guessed at.
+            observation = self._extractor.screened_out(
+                image, screen, anonymize_paths=self.anonymize_paths
+            )
+            return observation, None
+        return self._extractor.observe(image, anonymize_paths=self.anonymize_paths, screen=screen)
 
     def _finish(
         self, writer: TextIO | None, aggregator: Aggregator | None, result: RunResult

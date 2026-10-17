@@ -16,9 +16,11 @@ from typing import TYPE_CHECKING, Annotated, Any
 
 import imagehash
 import typer
+from pydantic_ai.exceptions import UserError
 
 from framelift._internal import synth as _synth
 from framelift._internal import video as _video
+from framelift._internal.extract import ModelMismatchError
 from framelift._internal.layout import Layout, NoCropError
 from framelift._internal.sources import (
     UnreadableInputError,
@@ -186,12 +188,15 @@ def run(
         if screen_model is None or loaded.screen_description is not None:
             raise
         raise typer.BadParameter(str(exc), param_hint="--screen-model") from exc
+    except UserError as exc:  # e.g. the provider's API key is not set
+        _report(exc)
+        raise typer.Exit(code=2) from exc
     try:
         result = pipeline.run(inputs)
     except FileNotFoundError as exc:
         raise typer.BadParameter(str(exc), param_hint="INPUTS") from exc
-    except _video.MissingVideoExtraError as exc:
-        typer.echo(str(exc), err=True)
+    except (_video.MissingVideoExtraError, ModelMismatchError) as exc:
+        _report(exc)
         raise typer.Exit(code=2) from exc
     from_cache = f" ({len(result.cached)} from cache)" if cache is not None else ""
     typer.echo(
@@ -209,6 +214,12 @@ def run(
         typer.echo(f"{len(result.items)} items{unkeyed} -> {result.items_path}", err=True)
     if result.failed:
         raise typer.Exit(code=1)
+
+
+def _report(exc: Exception) -> None:
+    """Print ``exc`` and its notes, which say e.g. which image it was found in or that the
+    output could not be written either."""
+    typer.echo("\n".join([str(exc), *getattr(exc, "__notes__", [])]), err=True)
 
 
 @app.command("eval")
@@ -247,9 +258,15 @@ def evaluate(
         cases = evaluation.build_dataset(dataset, loaded, root)
     except (OSError, ValueError) as exc:
         raise typer.BadParameter(str(exc), param_hint="DATASET") from exc
-    report = evaluation.run_evaluation(
-        cases, loaded, model, max_retries=max_retries, cache_dir=cache
-    )
+    try:
+        report = evaluation.run_evaluation(
+            cases, loaded, model, max_retries=max_retries, cache_dir=cache
+        )
+    # Any UserError, not only ModelMismatchError: the model is resolved in there too, which fails
+    # e.g. when the provider's API key is not set.
+    except UserError as exc:
+        _report(exc)
+        raise typer.Exit(code=2) from exc
     report.print(include_averages=True, include_reasons=True)
     # Low scores are results, but a case or evaluator that crashed means the run is incomplete.
     is_incomplete = bool(report.failures) or any(c.evaluator_failures for c in report.cases)

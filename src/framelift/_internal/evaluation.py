@@ -16,7 +16,12 @@ from pydantic_evals.evaluators import EvaluationReason, Evaluator, EvaluatorCont
 
 from framelift._internal.cache import Cache
 from framelift._internal.dataset import load_dataset
-from framelift._internal.extract import Extractor, model_label
+from framelift._internal.extract import (
+    Extractor,
+    ModelMismatchError,
+    model_label,
+    note_input,
+)
 from framelift._internal.items import ItemKeyer, dump_item, item_keyer
 from framelift._internal.layout import Layout, NoCropError
 from framelift._internal.sources import load_image
@@ -387,10 +392,17 @@ def run_evaluation(
     extractor = Extractor(profile, model, max_retries=max_retries, cache=cache)
     # The same image a run would send, so scores reflect what is cropped and redacted.
     layout = Layout.from_profile(profile)
+    # Another model answering is a setting, not a case: every case would be read by it. Once one
+    # is found, the later cases are not sent, and it is raised after the evaluation, as a run
+    # stops on it; pydantic-evals would otherwise record it as one more failed case.
+    mismatch: ModelMismatchError | None = None
 
     # Async, so the agent runs on pydantic-evals' event loop: a sync task would run in worker
     # threads, each with its own loop, which a provider's cached HTTP client cannot share.
     async def extract(inputs: CaseInputs) -> CaseOutput:
+        nonlocal mismatch
+        if mismatch is not None:
+            raise RuntimeError("Not sent: an earlier case was answered by another model")
         try:
             image = load_image(inputs.image, layout)
         except NoCropError as exc:
@@ -404,13 +416,21 @@ def run_evaluation(
         # The input file's hash, not the sent image's: a cropped image is a new PNG.
         if image.source_sha256 != inputs.sha256:
             raise ValueError(f"{inputs.image} changed after the dataset was checked")
-        observation, output = await extractor.observe_async(image)
+        try:
+            observation, output = await extractor.observe_async(image)
+        except ModelMismatchError as exc:
+            note_input(exc, image, anonymize_paths=False)
+            mismatch = exc
+            raise
         return CaseOutput(observation, output)
 
     # Cases run one at a time, to keep cost and provider rate limits predictable.
-    return dataset.evaluate_sync(
+    report = dataset.evaluate_sync(
         extract,
         name=f"{profile.name}@{profile.version} {model_label(model)}",
         max_concurrency=1,
         progress=progress,
     )
+    if mismatch is not None:
+        raise mismatch
+    return report

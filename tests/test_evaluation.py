@@ -22,6 +22,7 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.messages import (
     BinaryContent,
     ModelMessage,
@@ -35,6 +36,7 @@ from pydantic_core import to_json
 from examples.fantasy_shop import ShopScreen
 from examples.fantasy_shop import profile as fantasy_shop_profile
 from framelift import Profile
+from framelift._internal import cache as cache_module
 from framelift._internal.dataset import load_dataset, write_dataset
 from framelift._internal.evaluation import (
     ItemPairs,
@@ -63,7 +65,12 @@ def _image_sha(messages: list[ModelMessage]) -> str:
 
 
 def _model(
-    dataset_path: Path, answer: Answer, on_request: Callable[[], None] | None = None
+    dataset_path: Path,
+    answer: Answer,
+    on_request: Callable[[], None] | None = None,
+    *,
+    model_type: type[FunctionModel] = FunctionModel,
+    model_name: str = "fake",
 ) -> FunctionModel:
     """A model that answers each image with ``answer(expected)`` for that image."""
     dataset, _ = load_dataset(dataset_path)
@@ -75,7 +82,7 @@ def _model(
         data = answer(expected[_image_sha(messages)])
         return ModelResponse(parts=[ToolCallPart(info.output_tools[0].name, data)])
 
-    return FunctionModel(respond, model_name="fake")
+    return model_type(respond, model_name=model_name)
 
 
 def _evaluate(dataset_path: Path, answer: Answer, **kwargs: Any):
@@ -706,3 +713,30 @@ def test_a_case_without_a_crop_box_scores_like_a_failed_extraction(samples) -> N
     assert landscape.assertions["ValidationPassed"].value is False
     assert landscape.scores["FieldAccuracy"].value == 0.0
     assert len(sizes) == 2
+
+
+def test_another_model_answering_stops_the_evaluation_after_one_request(
+    samples, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, answering_model
+) -> None:
+    root, truths = samples
+    assert len(truths) > 1  # so that a later case could have been sent
+    dataset_path = root / "dataset.yaml"
+    requests: list[None] = []
+    model = _model(
+        dataset_path,
+        lambda expected: expected,
+        lambda: requests.append(None),
+        model_type=answering_model,
+        model_name="qwen3",
+    )
+    # A cache id, as a model string has, so that the answer could be cached.
+    monkeypatch.setattr(cache_module, "model_cache_id", lambda model: "openai-chat:qwen3")
+    dataset = build_dataset(dataset_path, shop_profile)
+
+    with pytest.raises(UserError, match="gemma-3") as raised:
+        run_evaluation(dataset, shop_profile, model, progress=False, cache_dir=tmp_path / "cache")
+
+    assert len(requests) == 1  # the later cases are not sent
+    (note,) = raised.value.__notes__
+    assert note.startswith("Found while reading ") and note.endswith(tuple(t.file for t in truths))
+    assert not (tmp_path / "cache").exists()

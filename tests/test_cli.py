@@ -10,10 +10,13 @@ from typing import Any
 import imagehash
 import pytest
 from PIL import Image
+from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
+from pydantic_ai.models.function import AgentInfo
 from typer.testing import CliRunner
 
 from framelift import Observation
 from framelift import cli as cli_module
+from framelift._internal import extract as extract_module
 from framelift.cli import app
 
 runner = CliRunner()
@@ -730,3 +733,48 @@ def test_frames_reports_a_screen_the_profile_cannot_crop(
 
     assert result.exit_code == 2
     assert "no crop box for landscape" in _plain(result.output)
+
+
+def _answer(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+    data = {"shop_name": "A", "items": [{"name": "a", "price": 1}]}
+    return ModelResponse(parts=[ToolCallPart(info.output_tools[0].name, data)])
+
+
+@pytest.mark.parametrize("command", ["run", "eval"])
+def test_another_model_answering_is_reported_without_a_traceback(
+    command: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, answering_model
+) -> None:
+    monkeypatch.chdir(Path(__file__).resolve().parents[1])
+    samples = tmp_path / "samples"
+    _synth(samples)
+    monkeypatch.setattr(
+        extract_module, "infer_model", lambda model: answering_model(_answer, model_name="qwen3")
+    )
+    target = [str(samples), "--out", str(tmp_path / "out")]
+    if command == "eval":
+        target = [str(samples / "dataset.yaml")]
+
+    result = runner.invoke(
+        app,
+        [command, *target, "--profile", "examples.fantasy_shop:profile", "--model", "openai:qwen3"],
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "'gemma-3'" in result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+
+
+def test_a_missing_api_key_is_reported_without_a_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(Path(__file__).resolve().parents[1])
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+
+    result = runner.invoke(
+        app,
+        ["run", str(tmp_path), "--profile", "examples.fantasy_shop:profile", "--model", "openai:x"],
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "OPENAI_API_KEY" in result.output

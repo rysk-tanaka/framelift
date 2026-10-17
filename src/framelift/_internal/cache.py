@@ -2,8 +2,9 @@
 images does not pay for them again.
 
 Entries live in ``cache_dir/<extract|screen>/<key[:2]>/<key>.json``. A key hashes `CACHE_REVISION`,
-the image sent, the model string and what else decides the answer (the profile's fingerprint, or
-the screen description and the profile's version). Only results that succeeded are stored.
+the image sent, the model string, the server's URL and what else decides the answer (the
+profile's fingerprint, or the screen description and the profile's version). Only results that
+succeeded are stored.
 """
 
 from __future__ import annotations
@@ -125,17 +126,24 @@ class Cache:
         self._warned_model = False
         self._warned_write = False
 
-    def model_id(self, model: Model | str) -> str | None:
-        """`model_cache_id`, warning once when ``model`` cannot be cached."""
+    def model_id(self, model: Model | str, resolved: Model) -> tuple[str, str] | None:
+        """`model_cache_id` and the URL of the server ``resolved`` (``model`` as a `Model`) asks,
+        as parts of a key, warning once when ``model`` cannot be cached.
+
+        The server is there because a model string does not name it: ``OPENAI_BASE_URL``, for
+        one, points the same string at another server.
+        """
         model_id = model_cache_id(model)
-        if model_id is None and not self._warned_model:
-            self._warned_model = True
-            warnings.warn(
-                "framelift caches only models given as strings such as 'anthropic:<model>'; a "
-                "Model instance is not cached, as its settings cannot be told apart",
-                skip_file_prefixes=(_PACKAGE_DIR,),
-            )
-        return model_id
+        if model_id is None:
+            if not self._warned_model:
+                self._warned_model = True
+                warnings.warn(
+                    "framelift caches only models given as strings such as 'anthropic:<model>'; "
+                    "a Model instance is not cached, as its settings cannot be told apart",
+                    skip_file_prefixes=(_PACKAGE_DIR,),
+                )
+            return None
+        return model_id, resolved.base_url or ""
 
     def _path(self, kind: Kind, key: str) -> Path:
         return self.root / kind / key[:2] / f"{key}.json"
