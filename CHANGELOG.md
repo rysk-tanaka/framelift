@@ -12,6 +12,18 @@ All notable changes to this project are documented here. This project follows
   the defaults in each case's metadata, while the ground truth and the default output stay the
   same
 
+### Changed
+
+- `framelift synth` lists the screenshots and videos it writes, with their SHA-256, in
+  `synth.sha256`; run again in the same directory, it removes the files listed there that still
+  match and that it did not write again (in the other format, or past `--n` or `--videos`), so
+  that `framelift run` over the directory reads only what the last run wrote. With `--videos 0`
+  the earlier videos are kept. Files it cannot remove stay listed, for the next run to try again
+- `framelift synth` draws everything in a staging directory and moves it in at the end, so a run
+  that fails while drawing leaves the output directory as it was (one stopped while moving the
+  files in is put right by running it again); without the video extra it stops before drawing,
+  and an output it cannot write ends with exit code 1 instead of a traceback
+
 ## [0.3.0] - 2026-10-17
 
 ### Added

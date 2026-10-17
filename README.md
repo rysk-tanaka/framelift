@@ -203,6 +203,11 @@ for the same `--seed`:
 framelift synth --out samples-jpeg --n 20 --scale 0.5 --noise 8 --jpeg-quality 70
 ```
 
+`synth` lists what it writes in `synth.sha256`. Run again in the same directory, it removes the
+files listed there that it did not write again, unless they were changed since; with
+`--videos 0` (the default) the earlier videos are kept. Files it never listed are left alone,
+apart from those it overwrites by name (`shop-000.png` and so on).
+
 A dataset lists each image (relative to the dataset root), its SHA-256 and the expected output,
 which lists every required field (fields with defaults may be left out):
 

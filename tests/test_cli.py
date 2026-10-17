@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -149,6 +150,7 @@ def test_degraded_synth_then_run_and_eval_with_the_test_model(
         "dataset.yaml",
         "shop-000.jpg",
         "shop-001.jpg",
+        "synth.sha256",
     ]
 
     profile = ["--profile", "examples.fantasy_shop:profile", "--model", "test"]
@@ -175,6 +177,50 @@ def test_synth_rejects_out_of_range_degradation(tmp_path: Path, option: list[str
     result = runner.invoke(app, ["synth", "--out", str(tmp_path / "samples"), "--n", "1", *option])
     assert result.exit_code == 2
     assert not (tmp_path / "samples").exists()
+
+
+def test_synth_prints_files_it_cannot_remove_even_when_warnings_are_filtered_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def generate(*args: object, **kwargs: object) -> list[object]:
+        warnings.warn("could not remove shop-001.png", cli_module._synth.StaleFilesWarning, 1)
+        warnings.warn("something else", DeprecationWarning, stacklevel=1)
+        return []
+
+    monkeypatch.setattr(cli_module._synth, "generate", generate)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        result = runner.invoke(app, ["synth", "--out", str(tmp_path), "--n", "1"])
+    assert result.exit_code == 0, result.output
+    assert "could not remove shop-001.png" in result.output
+    assert "something else" not in result.output  # other warnings keep their filters
+
+
+def test_synth_shows_other_warnings_also_when_it_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def generate(*args: object, **kwargs: object) -> list[object]:
+        warnings.warn("something else", RuntimeWarning, stacklevel=1)
+        raise OSError("disk full")
+
+    shown: list[str] = []
+    monkeypatch.setattr(cli_module._synth, "generate", generate)
+    # pytest records warnings itself; see what the CLI hands on instead.
+    monkeypatch.setattr(warnings, "showwarning", lambda message, *args: shown.append(str(message)))
+    with warnings.catch_warnings():
+        warnings.simplefilter("always")
+        result = runner.invoke(app, ["synth", "--out", str(tmp_path), "--n", "1"])
+    assert result.exit_code == 1
+    assert "disk full" in result.output
+    assert shown == ["something else"]
+
+
+def test_synth_reports_an_output_it_cannot_write(tmp_path: Path) -> None:
+    out = tmp_path / "samples"
+    out.write_text("a file, not a directory")
+    result = runner.invoke(app, ["synth", "--out", str(out), "--n", "1"])
+    assert result.exit_code == 1
+    assert "cannot write samples to" in result.output
 
 
 def test_eval_rejects_a_dataset_that_does_not_match_its_images(
@@ -431,6 +477,8 @@ def test_video_commands_without_the_extra_explain_how_to_install_it(
     assert result.exit_code == 2
     assert 'pip install "framelift[video]"' in result.output
     assert "Traceback" not in result.output
+    if command == "synth":
+        assert not (tmp_path / "samples").exists()  # checked before anything is drawn
 
 
 def test_run_says_why_items_were_left_out(
