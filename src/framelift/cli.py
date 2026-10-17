@@ -10,6 +10,7 @@ import re
 import sys
 import tempfile
 import traceback
+import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
 
@@ -378,16 +379,37 @@ def synth(
 ) -> None:
     """Generate screenshots of a fictional shop, with ground truth in dataset.yaml, and
     optionally videos of its list scrolling."""
-    truths = _synth.generate(
-        out, n=n, seed=seed, scale=scale, noise=noise, jpeg_quality=jpeg_quality
-    )
-    typer.echo(f"wrote {len(truths)} images and {_synth.DATASET_FILE} to {out}", err=True)
+    # Files of an earlier run that could not be removed are reported like the other messages,
+    # even when Python's warnings are filtered out; other warnings are shown as they would be,
+    # also when the run fails.
+    caught: list[warnings.WarningMessage] = []
     try:
-        for index in range(videos):
-            _synth.generate_video(out / f"shop-scroll-{index:03d}.mp4", seed=seed + index)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", _synth.StaleFilesWarning)
+            truths = _synth.generate(
+                out,
+                n=n,
+                seed=seed,
+                scale=scale,
+                noise=noise,
+                jpeg_quality=jpeg_quality,
+                videos=videos,
+            )
     except _video.MissingVideoExtraError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=2) from exc
+    except OSError as exc:  # e.g. --out is a file, not writable, or the disk is full
+        typer.echo(f"cannot write samples to {out}: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    finally:
+        for warning in caught:
+            if issubclass(warning.category, _synth.StaleFilesWarning):
+                typer.echo(str(warning.message), err=True)
+            else:
+                warnings.showwarning(
+                    warning.message, warning.category, warning.filename, warning.lineno
+                )
+    typer.echo(f"wrote {len(truths)} images and {_synth.DATASET_FILE} to {out}", err=True)
     if videos:
         typer.echo(f"wrote {videos} videos to {out}", err=True)
 

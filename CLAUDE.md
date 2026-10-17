@@ -90,7 +90,7 @@ framelift eval（framelift[eval] が必要）
   - `fields.py` — 出力モデルのフィールドから、モデル型・モデルの一覧型を見分ける（`| None` と `Annotated` を外す）
   - `dataset.py` — 評価用データセット（`framelift/dataset/v1`）の読み書きと sha256 照合。pydantic-evals に依存しない
   - `evaluation.py` — pydantic-evals による評価と評価器
-  - `synth.py` — 架空のショップ画面と正解（`dataset.yaml`）、スクロールする合成動画の生成。静止画は拡大・縮小、ノイズ、JPEG の順に劣化させられる
+  - `synth.py` — 架空のショップ画面と正解（`dataset.yaml`）、スクロールする合成動画の生成。静止画は拡大・縮小、ノイズ、JPEG の順に劣化させられる。書いたファイルは `synth.sha256` に記録し、生成し直すと、記録に載っていて sha256 が一致し、今回書かなかったファイルだけを消す（一時ディレクトリに書いてから移す）
 - `examples/fantasy_shop.py` — 合成サンプル用の Profile の例
 
 ## 設計上の原則

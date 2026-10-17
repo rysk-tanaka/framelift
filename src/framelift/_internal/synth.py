@@ -6,9 +6,13 @@ used as a public benchmark without any real game or app content.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import io
 import random
+import re
+import tempfile
+import warnings
 from dataclasses import asdict, dataclass
 from fractions import Fraction
 from pathlib import Path
@@ -18,6 +22,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 from framelift._internal.dataset import DatasetCase, write_dataset
+from framelift._internal.sources import hash_file
 from framelift._internal.video import import_av
 
 if TYPE_CHECKING:
@@ -101,6 +106,12 @@ def render(truth: SampleTruth) -> Image.Image:
 
 
 DATASET_FILE = "dataset.yaml"
+RECORD_FILE = "synth.sha256"
+"""Every screenshot and video `generate` wrote, with its SHA-256, in lines like those of
+``sha256sum`` (while a run moves its files in, a name can have two lines, the earlier and the new
+SHA-256). A later run removes only files listed there, and only while they still hold those bytes,
+so a user's own files in the directory are never removed (files under the names `generate` writes
+are overwritten, though)."""
 
 MIN_SCALE, MAX_SCALE = 0.1, 4.0
 MAX_NOISE = 64.0
@@ -162,13 +173,13 @@ def _degrade(
 
 
 def _to_case(
-    truth: SampleTruth, data: bytes, size: tuple[int, int], degradation: dict[str, Any]
+    truth: SampleTruth, sha256: str, size: tuple[int, int], degradation: dict[str, Any]
 ) -> DatasetCase:
     width, height = size
     return DatasetCase(
         name=Path(truth.file).stem,
         image=truth.file,
-        sha256=hashlib.sha256(data).hexdigest(),
+        sha256=sha256,
         expected={"shop_name": truth.shop_name, "items": [asdict(i) for i in truth.items]},
         metadata={"orientation": truth.orientation, "width": width, "height": height} | degradation,
     )
@@ -182,19 +193,31 @@ def generate(
     scale: float = DEFAULT_SCALE,
     noise: float = DEFAULT_NOISE,
     jpeg_quality: int | None = None,
+    videos: int = 0,
 ) -> list[SampleTruth]:
-    """Write ``n`` screenshots and a ``dataset.yaml`` with their ground truth.
+    """Write ``n`` screenshots, a ``dataset.yaml`` with their ground truth and ``videos``
+    scrolling videos (``shop-scroll-000.mp4`` and on, seeded ``seed``, ``seed + 1``...).
 
     Each screen is resized by ``scale`` (0.1-4), gets Gaussian noise with a standard deviation of
     ``noise`` (in 0-255 pixel values, up to 64) and is saved as a JPEG of ``jpeg_quality`` (1-95)
     instead of a PNG, in that order, like a screen captured on a device and then compressed. The
     defaults write the screens as drawn. The ground truth depends only on ``seed``.
+
+    Files that an earlier run listed in ``synth.sha256``, that still hold the bytes listed and
+    that this run did not write again (in the other format, or past ``n`` or ``videos``) are
+    removed; left there, a run over the directory would read them too. With ``videos`` 0 the
+    earlier run's videos are kept. Files that cannot be removed stay listed, so that the next run
+    tries again, and are reported as a `StaleFilesWarning`.
     """
     if n < 1:
         raise ValueError("n must be >= 1")
+    if videos < 0:
+        raise ValueError("videos must be >= 0")
     check_scale(scale)
     check_noise(noise)
     check_jpeg_quality(jpeg_quality)
+    if videos:
+        import_av("Synthetic videos")  # before anything is drawn
     out_dir.mkdir(parents=True, exist_ok=True)
     rng = random.Random(seed)
     # A stream of its own, so that noise does not change the items drawn. Seeded through a string,
@@ -205,23 +228,128 @@ def generate(
     settings = {"scale": scale, "noise": noise, "jpeg_quality": jpeg_quality}
     defaults = {"scale": DEFAULT_SCALE, "noise": DEFAULT_NOISE, "jpeg_quality": None}
     degradation = {key: value for key, value in settings.items() if value != defaults[key]}
+    earlier = _read_record(out_dir)
     truths: list[SampleTruth] = []
     cases: list[DatasetCase] = []
-    for index in range(n):
-        orientation: Orientation = "portrait" if index % 2 == 0 else "landscape"
-        truth = _random_truth(rng, f"shop-{index:03d}{suffix}", orientation)
-        image = _degrade(render(truth), scale=scale, noise=noise, rng=noise_rng)
-        buffer = io.BytesIO()
-        if jpeg_quality is None:
-            image.save(buffer, format="PNG")
-        else:
-            image.save(buffer, format="JPEG", quality=jpeg_quality)
-        data = buffer.getvalue()
-        (out_dir / truth.file).write_bytes(data)
-        truths.append(truth)
-        cases.append(_to_case(truth, data, image.size, degradation))
-    write_dataset(out_dir / DATASET_FILE, cases)
+    written: dict[str, set[str]] = {}
+    # Everything is drawn aside and moved in at the end, so a run that fails or is stopped while
+    # drawing leaves the directory as it was. Inside out_dir, so that the moves are renames on one
+    # file system.
+    with tempfile.TemporaryDirectory(
+        dir=out_dir, prefix=".synth-", ignore_cleanup_errors=True
+    ) as staging_dir:
+        staging = Path(staging_dir)
+        for index in range(n):
+            orientation: Orientation = "portrait" if index % 2 == 0 else "landscape"
+            truth = _random_truth(rng, f"shop-{index:03d}{suffix}", orientation)
+            image = _degrade(render(truth), scale=scale, noise=noise, rng=noise_rng)
+            buffer = io.BytesIO()
+            if jpeg_quality is None:
+                image.save(buffer, format="PNG")
+            else:
+                image.save(buffer, format="JPEG", quality=jpeg_quality)
+            data = buffer.getvalue()
+            (staging / truth.file).write_bytes(data)
+            sha256 = hashlib.sha256(data).hexdigest()
+            written[truth.file] = {sha256}
+            truths.append(truth)
+            cases.append(_to_case(truth, sha256, image.size, degradation))
+        for index in range(videos):
+            name = f"shop-scroll-{index:03d}.mp4"
+            generate_video(staging / name, seed=seed + index)
+            written[name] = {hash_file(staging / name)}
+        # Screenshots alone are being redrawn: the earlier videos stay, and so do their lines
+        # (but not those of videos the user has removed since).
+        kept = {
+            name: hashes
+            for name, hashes in earlier.items()
+            if not videos and _VIDEO.fullmatch(name) and (out_dir / name).is_file()
+        }
+        stale = {
+            name: hashes
+            for name, hashes in earlier.items()
+            if name not in written and name not in kept
+        }
+        write_dataset(staging / DATASET_FILE, cases)
+        # The record goes first and lists the stale files too, and for a name written again both
+        # the earlier and the new SHA-256, so that whatever happens next every file synth wrote
+        # stays listed: a run stopped among the renames below, or before the stale files are
+        # removed, leaves nothing that a later run cannot remove. Same-named files that are not
+        # moved yet may no longer match the earlier dataset.yaml, though.
+        _write_record(
+            staging,
+            out_dir,
+            {name: hashes | earlier.get(name, set()) for name, hashes in written.items()}
+            | kept
+            | stale,
+        )
+        for name in [*written, DATASET_FILE]:
+            (staging / name).replace(out_dir / name)
+        failed = _remove_stale(out_dir, stale)
+        # Then only this run's files, the kept videos, and those that could not be removed for the
+        # next run to try again. Everything is in place by now and the first record lists it all,
+        # so a failure here only leaves more lines than needed: not a reason to fail the run.
+        with contextlib.suppress(OSError):
+            _write_record(staging, out_dir, written | kept | failed)
+    if failed:
+        warnings.warn(
+            f"framelift synth could not remove {', '.join(sorted(failed))} from {out_dir}, written "
+            "by an earlier run; a run over the directory reads them too until a later run "
+            "removes them",
+            StaleFilesWarning,
+            stacklevel=2,
+        )
     return truths
+
+
+def _write_record(staging: Path, out_dir: Path, entries: dict[str, set[str]]) -> None:
+    """Replace ``synth.sha256`` in ``out_dir`` with ``entries``, written in ``staging`` and moved
+    in, so that it is never left half-written. A name may have more than one line."""
+    record = "".join(
+        f"{sha256}  {name}\n" for name, hashes in entries.items() for sha256 in sorted(hashes)
+    )
+    (staging / RECORD_FILE).write_text(record, encoding="utf-8")
+    (staging / RECORD_FILE).replace(out_dir / RECORD_FILE)
+
+
+class StaleFilesWarning(UserWarning):
+    """Files an earlier run of synth wrote could not be removed; a run over the directory reads
+    them too."""
+
+
+_SCREENSHOT = re.compile(r"shop-\d{3,}\.(?:png|jpg)")
+_VIDEO = re.compile(r"shop-scroll-\d{3,}\.mp4")
+_RECORD_LINE = re.compile(r"([0-9a-f]{64})  (\S+)")
+
+
+def _read_record(out_dir: Path) -> dict[str, set[str]]:
+    """The files that ``synth.sha256`` in ``out_dir`` lists, with the SHA-256 each may have; none
+    when there is none or it cannot be read. Only names `generate` writes count, which also keeps
+    them inside ``out_dir``."""
+    try:
+        lines = (out_dir / RECORD_FILE).read_text(encoding="utf-8").splitlines()
+    except (OSError, ValueError):  # ValueError covers a file that is not UTF-8
+        return {}
+    record: dict[str, set[str]] = {}
+    for line in lines:
+        match = _RECORD_LINE.fullmatch(line)
+        if match and (_SCREENSHOT.fullmatch(match[2]) or _VIDEO.fullmatch(match[2])):
+            record.setdefault(match[2], set()).add(match[1])
+    return record
+
+
+def _remove_stale(out_dir: Path, stale: dict[str, set[str]]) -> dict[str, set[str]]:
+    """Remove the ``stale`` files that still hold bytes listed for them, and return those that
+    could not be removed. Files that are gone or were changed since are no longer synth's."""
+    failed: dict[str, set[str]] = {}
+    for name, hashes in stale.items():
+        path = out_dir / name
+        try:
+            if path.is_file() and hash_file(path) in hashes:
+                path.unlink()
+        except OSError:
+            failed[name] = hashes
+    return failed
 
 
 # Scrolling video: a landscape screen whose list area shows exactly _VIEW_ROWS rows, so no row is
