@@ -8,5 +8,6 @@
   "ignores": [
     "**/node_modules/**",
     ".tmp/**",
+    ".delta/**",
   ],
 }
