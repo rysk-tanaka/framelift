@@ -5,12 +5,18 @@ All notable changes to this project are documented here. This project follows
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-18
+
 ### Changed
 
 - Still screens of a video are told apart, and their sharpest sample picked, on the part of the
-  screen that is sent: cropped to `locate`, with `redact` blacked out. Movement elsewhere, such as
-  a character's idle animation beside the list being read, no longer splits a still screen and
+  screen that is sent: the `locate` crop, leaving out tiles that `redact` mostly covers for the
+  movement and pixels next to a redaction for the sharpness. Movement elsewhere, such as a
+  character's idle animation beside the list being read, no longer splits a still screen and
   sends the same list again; a video may yield other frames than with 0.4.0
+- `motion_threshold` (`--motion-threshold`) is, with a profile, a share of the tiles of that part
+  of the screen; a crop smaller than 256 pixels a side is shrunk less instead of enlarged, so the
+  default still fits it
 - `framelift frames --profile` picks frames the same way, so it still writes the frames `run`
   sends
 
@@ -130,7 +136,8 @@ All notable changes to this project are documented here. This project follows
 - `framelift run` and `framelift synth` CLI commands
 - Synthetic fictional-shop sample generator
 
-[Unreleased]: https://github.com/rysk-tanaka/framelift/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/rysk-tanaka/framelift/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/rysk-tanaka/framelift/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/rysk-tanaka/framelift/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/rysk-tanaka/framelift/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/rysk-tanaka/framelift/compare/v0.1.0...v0.2.0
