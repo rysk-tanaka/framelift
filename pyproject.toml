@@ -86,5 +86,5 @@ testpaths = ["tests"]
 pythonpath = ["."]
 addopts = ["-ra", "--strict-markers", "-m", "not live"]
 markers = [
-    "live: calls a real model provider (needs API keys; not run in CI)",
+    "live: calls the real model named by FRAMELIFT_LIVE_MODEL, skipped without it (needs the provider's API key; not run in CI)",
 ]
