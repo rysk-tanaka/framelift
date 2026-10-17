@@ -9,6 +9,10 @@ switch), and ignores a small animation such as a clock or an effect in one corne
 Each still segment contributes its sharpest sample, so samples taken while the screen moves are
 not sent; only a video that never stands still is read once, from its sharpest sample.
 
+Given a `Layout`, movement and sharpness are measured on the part of the screen that is sent,
+with its redactions blacked out, so that movement elsewhere (a character's idle animation beside
+the list being read) does not split a still screen.
+
 Each sample is the frame on screen at a sampling instant, so a variable-frame-rate recording that
 encodes a still screen as one long frame counts as one sample per instant it was shown.
 
@@ -26,7 +30,7 @@ import imagehash
 import numpy as np
 from PIL import Image
 
-from framelift._internal.layout import encode_png
+from framelift._internal.layout import NoCropError, encode_png
 from framelift._internal.sources import ImageSource, UnreadableInputError, error_reason
 
 if TYPE_CHECKING:
@@ -261,6 +265,7 @@ def sample_video(
     frame_rate: float = DEFAULT_FRAME_RATE,
     motion_threshold: float = DEFAULT_MOTION_THRESHOLD,
     min_still_samples: int = MIN_STILL_SAMPLES,
+    layout: Layout | None = None,
 ) -> Generator[VideoFrame, None, None]:
     """Yield the sharpest frame of every still segment of a video, in order.
 
@@ -269,7 +274,8 @@ def sample_video(
     ``motion_threshold`` of the screen (the share of 16x16 tiles, 0-1) changed. Segments
     with fewer than ``min_still_samples`` samples are movement and are dropped, so a screen shown
     for less than about ``min_still_samples / frame_rate`` seconds can be missed. A video with no
-    still segment yields its sharpest sample.
+    still segment yields its sharpest sample. With a ``layout``, both are measured on the part of
+    the screen it sends; the frames yielded are still whole screens.
 
     Raises `MissingVideoExtraError` without PyAV and `UnreadableInputError` (a `ValueError`) for
     unreadable videos.
@@ -308,7 +314,7 @@ def sample_video(
                     repeats = ticks_before(next_time, time, step)
                     if repeats:
                         next_time += repeats * step
-                        yield from segmenter.add(_to_sample(*shown), repeats)
+                        yield from segmenter.add(_to_sample(*shown, layout), repeats)
                 shown = (frame, time)
             if shown is None or next_time is None:
                 raise UnreadableInputError("video", path, "no frames")
@@ -323,7 +329,7 @@ def sample_video(
             else:
                 repeats = 1 if next_time <= last_time + _TIME_TOLERANCE else 0
             if repeats:
-                yield from segmenter.add(_to_sample(last_frame, last_time), repeats)
+                yield from segmenter.add(_to_sample(last_frame, last_time, layout), repeats)
             # Inside the try: the last segment's frame is converted to color here.
             yield from segmenter.finish()
         except av.error.FFmpegError as exc:
@@ -357,13 +363,28 @@ def _end_time(
     return None
 
 
-def _to_sample(frame: Any, time: float) -> _Sample:
+def _to_sample(frame: Any, time: float, layout: Layout | None) -> _Sample:
     # Movement and sharpness need only the luma plane, at full size but without converting to
-    # RGB or rotating: every sample of a stream has the same rotation, and the Laplacian's
-    # variance does not change under a quarter turn. The color image is built only for the
-    # samples that are sent.
+    # RGB: the color image is built only for the samples that are sent.
     gray = frame.to_ndarray(format="gray")
+    if layout is not None and not layout.is_identity:
+        gray = _visible(gray, frame.rotation, layout)
+    # Without a layout the plane is not even turned upright: every sample of a stream has the
+    # same rotation, and the Laplacian's variance does not change under a quarter turn.
     return _Sample.of_gray(gray, time, lambda: upright(frame.to_image(), frame.rotation))
+
+
+def _visible(gray: NDArray[np.uint8], rotation: float, layout: Layout) -> NDArray[np.uint8]:
+    """The part of a luma plane that ``layout`` sends, turned upright first, as its boxes are."""
+    degrees = round(rotation) % 360
+    if degrees in _TRANSPOSE:
+        # Counterclockwise quarter turns, as upright turns the color image.
+        gray = np.rot90(gray, k=degrees // 90)
+    try:
+        return np.ascontiguousarray(layout.visible(gray))
+    except NoCropError:
+        # The whole screen, then; frame_to_source reports the picked frame as uncropped.
+        return np.ascontiguousarray(gray)
 
 
 def frame_to_source(

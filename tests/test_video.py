@@ -15,6 +15,7 @@ import pytest
 from PIL import Image, ImageDraw
 
 from framelift._internal import synth, video
+from framelift._internal.layout import Layout
 
 pytest.importorskip("av")
 
@@ -231,6 +232,64 @@ def test_a_small_animation_does_not_split_a_still_screen(tmp_path: Path) -> None
     synth.write_video(path, frames, fps=FPS)
 
     assert len(list(video.sample_video(path))) == 1
+
+
+def _beside_a_figure(screen: Image.Image, box: tuple[float, float, float, float]) -> list:
+    """The screen with a large block in ``box`` (fractions) that jumps every 0.8 s, like a
+    character's idle animation next to the list being read."""
+    width, height = screen.size
+    left, top, right, bottom = box
+    frames = []
+    for i in range(32):
+        frame = screen.copy()
+        x = left * width + (i // 8) * (right - left) * width / 5
+        block = (x, top * height, x + (right - left) * width / 5 * 2, bottom * height)
+        ImageDraw.Draw(frame).rectangle(block, fill=(240, 200, 40))
+        frames.append(frame)
+    return frames
+
+
+def test_movement_outside_the_crop_does_not_split_a_still_screen(tmp_path: Path) -> None:
+    path = tmp_path / "figure.mp4"
+    synth.write_video(path, _beside_a_figure(_view().render(0), (0.0, 0.0, 0.4, 1.0)), fps=FPS)
+    beside = Layout(locate={"landscape": (0.4, 0.0, 1.0, 1.0)}, redact={})
+
+    assert len(list(video.sample_video(path))) == 4
+    (frame,) = video.sample_video(path, layout=beside)
+    assert frame.image.size == (1280, 720)  # whole screens are yielded, cropped later
+
+
+def test_movement_under_a_redaction_does_not_split_a_still_screen(tmp_path: Path) -> None:
+    path = tmp_path / "figure.mp4"
+    synth.write_video(path, _beside_a_figure(_view().render(0), (0.0, 0.0, 0.4, 1.0)), fps=FPS)
+    covered = Layout(locate="full", redact={"landscape": ((0.0, 0.0, 0.4, 1.0),)})
+
+    assert len(list(video.sample_video(path, layout=covered))) == 1
+
+
+def test_a_layout_without_a_box_for_the_screen_compares_whole_screens(tmp_path: Path) -> None:
+    path = tmp_path / "figure.mp4"
+    synth.write_video(path, _beside_a_figure(_view().render(0), (0.0, 0.0, 0.4, 1.0)), fps=FPS)
+    portrait_only = Layout(locate={"portrait": (0.4, 0.0, 1.0, 1.0)}, redact={})
+
+    assert len(list(video.sample_video(path, layout=portrait_only))) == 4
+
+
+@pytest.mark.parametrize(("box", "count"), [((0.0, 0.5, 1.0, 1.0), 1), ((0.0, 0.0, 1.0, 0.5), 4)])
+def test_the_crop_is_found_on_the_upright_screen(
+    tmp_path: Path, box: tuple[float, float, float, float], count: int
+) -> None:
+    upright = _view().render(0).resize((360, 640))
+    path = tmp_path / "rotated.mp4"
+    # Stored a quarter turn clockwise, and shown upright by turning it back counterclockwise.
+    stored = [
+        frame.transpose(Image.Transpose.ROTATE_270)
+        for frame in _beside_a_figure(upright, (0.0, 0.0, 1.0, 0.45))
+    ]
+    synth.write_video(path, stored, fps=FPS, rotation=90)
+    layout = Layout(locate={"portrait": box}, redact={})
+
+    assert len(list(video.sample_video(path, layout=layout))) == count
 
 
 @pytest.mark.parametrize(

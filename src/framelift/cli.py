@@ -293,7 +293,7 @@ def _picked(
         yield record, source.view
         return
     for frame in _video.sample_video(
-        path, frame_rate=frame_rate, motion_threshold=motion_threshold
+        path, frame_rate=frame_rate, motion_threshold=motion_threshold, layout=layout
     ):
         view, crop = layout.apply(frame.image)
         record = {

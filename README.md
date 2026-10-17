@@ -110,6 +110,9 @@ animation such as a clock. Only the sharpest sample of each still screen is sent
 scrolling frames are not read (a video that never stands still is read once, from its sharpest
 sample). A screen shown for less than about two samples can be missed, and so can the screens
 passed during a slow scroll that never stops: pause on each screen you want read.
+Movement is measured on the part of the screen that is sent, after `locate` and `redact`, so
+redacting an animated area, such as a character beside the list, keeps it from splitting a
+still screen.
 To see which frames would be sent, without calling a model:
 
 ```bash

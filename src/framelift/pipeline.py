@@ -322,7 +322,10 @@ class Pipeline[OutputT: BaseModel]:
                 yield _Unreadable(UnreadableInputError(kind, path, error_reason(exc)))
                 continue
             frames = sample_video(
-                path, frame_rate=self.frame_rate, motion_threshold=self.motion_threshold
+                path,
+                frame_rate=self.frame_rate,
+                motion_threshold=self.motion_threshold,
+                layout=self._layout,
             )
             try:
                 with closing(frames):

@@ -20,6 +20,9 @@ from framelift.observation import Crop
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
+    import numpy as np
+    from numpy.typing import NDArray
+
     from framelift.profile import Box, Orientation, Profile
 
 _FULL: Box = (0.0, 0.0, 1.0, 1.0)
@@ -136,15 +139,7 @@ class Layout:
         """
         screen = normalize(image)
         size = screen.size
-        orientation = orientation_of(size)
-        if self.locate == "full":
-            bbox = _FULL
-        else:
-            box = self.locate.get(orientation)
-            if box is None:
-                raise NoCropError(orientation, size)
-            bbox = box
-        redact = self.redact.get(orientation, ())
+        orientation, bbox, redact = self._boxes(size)
         if redact:
             draw = ImageDraw.Draw(screen)
             black = (0, 0, 0, 255) if screen.mode == "RGBA" else (0, 0, 0)
@@ -154,3 +149,32 @@ class Layout:
         if bbox != _FULL:
             screen = screen.crop(_pixels(bbox, screen.size))
         return screen, Crop(orientation=orientation, size=size, bbox=bbox, redact=list(redact))
+
+    def visible(self, gray: NDArray[np.uint8]) -> NDArray[np.uint8]:
+        """The part of an upright grayscale screen that `apply` sends, redactions in black.
+
+        Lets a video's still screens be told apart by what is sent. Raises `NoCropError` when
+        the screen's orientation has no crop box.
+        """
+        height, width = gray.shape
+        size = (width, height)
+        _, bbox, redact = self._boxes(size)
+        if redact:
+            gray = gray.copy()
+            for area in redact:
+                left, top, right, bottom = _pixels(area, size)
+                gray[top:bottom, left:right] = 0
+        left, top, right, bottom = _pixels(bbox, size)
+        return gray[top:bottom, left:right]
+
+    def _boxes(self, size: tuple[int, int]) -> tuple[Orientation, Box, tuple[Box, ...]]:
+        """The orientation of a screen of ``size``, its crop box and its redactions."""
+        orientation = orientation_of(size)
+        if self.locate == "full":
+            bbox = _FULL
+        else:
+            box = self.locate.get(orientation)
+            if box is None:
+                raise NoCropError(orientation, size)
+            bbox = box
+        return orientation, bbox, self.redact.get(orientation, ())
