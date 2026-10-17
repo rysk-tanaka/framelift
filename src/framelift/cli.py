@@ -128,7 +128,8 @@ MotionThreshold = Annotated[
     typer.Option(
         callback=_checked(_video.check_motion_threshold),
         help="How much of the screen (share of 16x16 tiles, 0-1) may change between video "
-        "frames that still count as one still screen",
+        "frames that still count as one still screen; with a profile, of the part that is sent "
+        "(the locate crop, leaving out tiles mostly redacted)",
     ),
 ]
 

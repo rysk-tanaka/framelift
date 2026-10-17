@@ -123,7 +123,8 @@ class Pipeline[OutputT: BaseModel]:
             extraction and for the screen check, each.
         anonymize_paths: Omit input paths from observations, keeping only hashes.
         frame_rate: How many video frames per second to examine.
-        motion_threshold: How much of the screen (the share of 16x16 tiles, 0-1) may change
+        motion_threshold: How much of the part of the screen that is sent (the share of 16x16
+            tiles of the ``locate`` crop that ``redact`` leaves mostly visible, 0-1) may change
             between a video sample and the previous sample, and between it and the first sample
             of its still screen, for it to still belong to that screen. Only the sharpest sample
             of each still screen is sent to the model.

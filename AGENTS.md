@@ -49,6 +49,7 @@ Pipeline.run(inputs)
       動画があれば、モデルを呼ぶ前に PyAV を import できるか確かめる（なければ ImportError）
   → 画像: load_image で読み込み、sha256 を計算し、Layout で送る画像を作る
     動画: sample_video で一定間隔の標本を取り、縮小画像のタイルのうち変化した割合で静止区間に分け、区間ごとに最も鮮明な 1 枚に Layout を適用して PNG にする（frame_to_source）
+      変化の割合と鮮明さは、表示どおりの向きにした輝度を Layout.visible で送る範囲に切り出して測る。塗りつぶしが半分以上のタイルは割合の分母から外し、鮮明さは塗りつぶしに接しない画素だけで測る。縮小は各辺 256px 以下で、切り出しより大きくしない
     Layout: EXIF の向きと色空間を正規化し、redact を黒く塗ってから locate の範囲で切り出す。向きに合う範囲がなければ NoCropError（error の観測にして次へ進む）
     full かつ redact なしの静止画だけは、元のバイト列をそのまま送る
   → Profile.screen_description があれば ScreenClassifier.classify: 送る画像（ImageSource.view）を長辺 512px に縮小した PNG で対象画面か判定する
