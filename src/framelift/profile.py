@@ -113,9 +113,12 @@ class Profile[OutputT: BaseModel]:
         name: Identifier written to every observation, e.g. ``"fantasy-shop"``.
         output_type: The Pydantic model to fill in. Field descriptions are passed to the model.
         instructions: How to read the screen.
-        version: Bump this whenever the instructions or the output model change, so that
-            observations, caches and evaluation results can be told apart.
-        validators: Extra checks run on every output; see `Validator`.
+        version: Bump this whenever the instructions, the output model or the validators change,
+            so that observations, caches and evaluation results can be told apart. Validators
+            are code and are not in `fingerprint`, so a cache keeps answers checked by the old
+            ones until the version changes.
+        validators: Extra checks run on every output; see `Validator`. They must give the same
+            result for the same output, as a cached answer is not checked by them again.
         locate: Which part of the screen to send. ``"full"`` sends the whole screen; a mapping
             such as ``{"portrait": (0.0, 0.1, 1.0, 0.9), "landscape": ...}`` crops each
             orientation to a `Box`. A screen whose orientation has no box is not sent and is
@@ -172,6 +175,7 @@ class Profile[OutputT: BaseModel]:
                 # read from them.
             },
             sort_keys=True,
-            ensure_ascii=False,
         )
+        # ASCII, escaping everything else, so that a lone surrogate, which UTF-8 cannot encode,
+        # still has a fingerprint.
         return hashlib.sha256(payload.encode()).hexdigest()

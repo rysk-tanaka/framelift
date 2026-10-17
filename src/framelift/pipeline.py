@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel
 
 from framelift._internal.aggregate import Aggregator
+from framelift._internal.cache import Cache
 from framelift._internal.extract import Extractor
 from framelift._internal.items import item_keyer
 from framelift._internal.layout import Layout, NoCropError
@@ -93,6 +94,11 @@ class RunResult:
         return [o for o in self.observations if o.status == "ok"]
 
     @property
+    def cached(self) -> list[Observation]:
+        """Successful observations whose extraction was read from the cache."""
+        return [o for o in self.observations if o.status == "ok" and o.cached]
+
+    @property
     def skipped(self) -> list[Observation]:
         """Images the screen check found to show another screen."""
         return [o for o in self.observations if o.status == "skipped"]
@@ -121,6 +127,9 @@ class Pipeline[OutputT: BaseModel]:
             between a video sample and the previous sample, and between it and the first sample
             of its still screen, for it to still belong to that screen. Only the sharpest sample
             of each still screen is sent to the model.
+        cache_dir: Where to cache extractions and screen checks, so that images read before
+            are not paid for again. ``None`` caches nothing. Only models given as strings are
+            cached; see `Profile.version` for when to bump it so that old entries are not used.
     """
 
     def __init__(
@@ -134,6 +143,7 @@ class Pipeline[OutputT: BaseModel]:
         anonymize_paths: bool = False,
         frame_rate: float = DEFAULT_FRAME_RATE,
         motion_threshold: float = DEFAULT_MOTION_THRESHOLD,
+        cache_dir: str | Path | None = None,
     ) -> None:
         if max_retries < 0:
             raise ValueError("max_retries must be >= 0")
@@ -146,14 +156,20 @@ class Pipeline[OutputT: BaseModel]:
         self.anonymize_paths = anonymize_paths
         self.frame_rate = frame_rate
         self.motion_threshold = motion_threshold
+        self.cache_dir = Path(cache_dir) if cache_dir is not None else None
+        cache = Cache(self.cache_dir) if self.cache_dir is not None else None
         self.screen_model: Model | str | None = None
         """The model the screen check uses; None when the profile has no screen_description."""
-        self._extractor = Extractor(profile, model, max_retries=max_retries)
+        self._extractor = Extractor(profile, model, max_retries=max_retries, cache=cache)
         self._classifier = None
         if profile.screen_description is not None:
             self.screen_model = model if screen_model is None else screen_model
             self._classifier = ScreenClassifier(
-                profile.screen_description, self.screen_model, max_retries=max_retries
+                profile.screen_description,
+                self.screen_model,
+                max_retries=max_retries,
+                cache=cache,
+                version=profile.version,
             )
         self._layout = Layout.from_profile(profile)
 

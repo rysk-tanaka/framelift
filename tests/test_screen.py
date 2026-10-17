@@ -50,7 +50,9 @@ def test_the_check_is_asked_with_the_description(tmp_path: Path) -> None:
         )
 
     source = load_image(_image(tmp_path / "a.png", (720, 1280)), Layout.full())
-    classifier = ScreenClassifier("a shop's item list", FunctionModel(respond), max_retries=0)
+    classifier = ScreenClassifier(
+        "a shop's item list", FunctionModel(respond), max_retries=0, version="1"
+    )
 
     screen = classifier.classify(source)
 
@@ -71,7 +73,7 @@ def test_a_check_that_never_validates_is_a_failure_with_its_usage(tmp_path: Path
         )
 
     source = load_image(_image(tmp_path / "a.png", (100, 200)), Layout.full())
-    classifier = ScreenClassifier("a shop", FunctionModel(out_of_range), max_retries=1)
+    classifier = ScreenClassifier("a shop", FunctionModel(out_of_range), max_retries=1, version="1")
 
     screen = classifier.classify(source)
 

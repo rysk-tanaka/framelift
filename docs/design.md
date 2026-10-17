@@ -140,7 +140,23 @@ graph LR
 
 Pydantic AI の `Agent` に、`output_type` と切り出した画像（`BinaryContent`）を渡す。`validators` は出力検証として登録し、`ModelRetry` で再試行させる（上限回数は `Pipeline` の `max_retries`）。再試行を使い切った画像は `status: "error"` として記録し、1 枚の失敗で全体は止めない。読めない画像・動画も `status: "error"`、`frame: null` の観測として記録して次の入力へ進み、壊れる前に読めたフレームの結果は残す。途中で壊れている動画、フレームが 1 つもない動画、権限がない・途中で消えたなどでファイルを開けないものもこれに含む。ファイルを開けなければ `source.sha256` も null にする。モデルは `"provider:model"` の文字列で指定し、差し替えられる。トークン使用量と処理時間を記録する。
 
-結果は「切り出し画像のハッシュ・モデル名・`Profile.version`」をキーにローカルにキャッシュし、再実行や評価の繰り返しで同じ画像に課金しない。
+#### キャッシュ
+
+`Pipeline(cache_dir=...)`（CLI は `run --cache DIR`・`eval --cache DIR`）を指定したときだけ、抽出と画面判定の結果をそのディレクトリにキャッシュし、再実行や評価の繰り返しで同じ画像に課金しない。読み取った内容を、利用者の知らない場所に残さないため、既定では無効にする。
+
+- 抽出のキーは「送る画像の sha256・モデルの文字列・`Profile.fingerprint`」、画面判定のキーは「判定に送る縮小画像の sha256・モデルの文字列・`screen_description`・`Profile.version`」。切り出し範囲を変えると送る画像が変わるので、キーも変わる。判定のキーに `Profile.version` を入れるのは、版を上げれば判定もやり直せるようにするため。説明文を変えずに、誤った判定をやり直す手段がほかにない
+- どちらのキーにも `CACHE_REVISION` を入れる。framelift 自身のプロンプト・判定の指示文と出力・エントリの形式を変えたらこれを上げ、古い版で作ったエントリを使わない
+- モデルの文字列（`"anthropic:<model>"` など）にはプロバイダと API の種類が含まれる。接続先や認証を環境変数で変えた違いはキーに入らない
+- `Model` のインスタンスで渡したモデルはキャッシュせず、警告を 1 回出す。設定・プロファイル・内側のモデル・HTTP クライアントなど、答えを変える構成を外から確実に見分けられないため。CLI の `--model` は常に文字列なので、CLI では常に使える
+- 検証を通った抽出と、成功した判定だけを書く。失敗は次の実行で成功しうるので書かない
+- `max_retries` はキーに入れず、エントリに元の再試行回数を残す。今の `max_retries` より多く再試行して通ったエントリは使わない。上限を下げた評価で、上限を超えて通った結果を成功に数えないため
+- 抽出結果は、出力モデルのフィールド名で、設定されたフィールドだけを JSON にして残し、ヒットしたら出力モデルで検証し直して復元する。`Field(exclude=True)` のフィールドと private 属性は書かないので、観測記録に出さない値はディスクにも残らない
+- 書く前に、その JSON から復元したモデルが元のモデルと厳密に同じ状態か（型・設定されたフィールド・除外フィールド・extra・private 属性。`False` と `0` も区別する）を確かめ、同じときだけ書く。冪等でないバリデータ、除外フィールドや private 属性に値を持つモデル、`Profile.validators` が項目を派生型に差し替えるモデル、NaN を含むモデルは、キャッシュが効かないが結果は正しい。こうして、ヒットしたときの `data`・項目・`item_key` のキーは、課金した実行と同じになる
+- ヒットしたら、観測記録の `data` の sha256 をエントリと照合し、ライブラリの更新でシリアライズが変わったなどで合わなければ、読めない・壊れたエントリと同じくミスとして抽出し直す
+- バリデータは同じ入力に同じ結果を返すものとする。`validators` はコードなので `fingerprint` に入らない。バリデータを変えたら `Profile.version` を上げる
+- ヒットした観測は `cached: true`（判定は `screen.cached`）で、`usage`・`retries`・`latency_ms` は元の実行のものを残す。評価でキャッシュしたケースのコストが 0 に見えて、モデルどうしの比較が狂わないようにするため
+- エントリは `cache_dir/<extract|screen>/<キーの先頭 2 文字>/<キー>.json`。一時ファイルに書いて置き換えるので、途中で止まっても壊れたエントリが残らない。書き込みに失敗したら警告を 1 回出して実行を続ける。結果は得ていて、課金も済んでいるため
+- 古いエントリは消さない。不要になったらディレクトリごと消す
 
 #### 集約
 
@@ -169,7 +185,9 @@ Pydantic AI の `Agent` に、`output_type` と切り出した画像（`BinaryCo
  "frame": {"index": 3, "timestamp_ms": 2250, "sha256": "...", "phash": "..."},
  "crop": {"orientation": "portrait", "size": [1170, 2532], "bbox": [0.0, 0.1, 1.0, 0.85], "redact": [[0.0, 0.85, 1.0, 1.0]]},
  "screen": {"is_target": true, "confidence": 0.93, "model": "anthropic:<model>",
-            "usage": {"input_tokens": 410, "output_tokens": 24, "requests": 1, "latency_ms": 640}, "error": null},
+            "usage": {"input_tokens": 410, "output_tokens": 24, "requests": 1, "latency_ms": 640},
+            "error": null, "cached": false},
+ "cached": false,
  "data": {"shop_name": "...", "items": [...]},
  "error": null,
  "model": "anthropic:<model>",
@@ -183,10 +201,11 @@ Pydantic AI の `Agent` に、`output_type` と切り出した画像（`BinaryCo
 - 静止画では `index: 0`、`timestamp_ms: null`。`full` で塗りつぶしもなく、元のバイト列をそのまま送ったときだけ、`frame.sha256` は `source.sha256` と同じになる
 - `crop` の `size` は、表示どおりの向きにした画面の切り出す前の寸法（ピクセル）。`bbox` は切り出した範囲で、`full` なら `[0, 0, 1, 1]`。`redact` は実際に塗りつぶした領域
 - `screen` は画面判定の結果で、`screen_description` がないとき、または何も送らなかったときは null。判定に失敗したときは `is_target` と `confidence` が null で、`error` に理由が入る
+- `cached` は抽出をキャッシュから読んだかどうか。`true` でも、`usage` と `retries` は元の実行のもの
 - `status` は `ok`・`skipped`（判定で対象外とした）・`error` のどれか。`skipped` では `data` と `error` が null で、抽出の `usage` は 0
 - 入力そのものを読めなかったときは、何も送っていないので `frame` と `crop` は null。向きに合う切り出し範囲がなかったときは、`frame` は null で、`crop` には `orientation` だけを入れ、`bbox` を null にする
 
-v3 は 0.3.0 で初めてリリースする。0.3 の画面判定（`screen`・`skipped`）とキャッシュも v3 に項目を足すが、v3 を書くリリースがまだないので、そのたびに版は上げない。
+v3 は 0.3.0 で初めてリリースする。0.3 の画面判定（`screen`・`skipped`）とキャッシュ（`cached`）も v3 に項目を足すが、v3 を書くリリースがまだないので、そのたびに版は上げない。
 
 `items.jsonl`（集約後）は 0.2 で入れた。`Profile.item_key` があるときだけ書く。
 
@@ -246,7 +265,7 @@ cases:
 
 ### プライバシー
 
-処理はローカルで行い、外部に送るのは切り出しと塗りつぶしを済ませた画像だけ。既定の送信ポリシーも「切り出し後の画像のみ」にする。画面には、チャットや他のプレイヤー名など、無関係な個人情報が映るため。`Profile.locate` は必須で、画面全体を送るのは `"full"` と明示したときだけ。テレメトリは持たない。Logfire は任意の依存で、既定では無効。キャッシュと出力はローカルのディレクトリにだけ書く。
+処理はローカルで行い、外部に送るのは切り出しと塗りつぶしを済ませた画像だけ。既定の送信ポリシーも「切り出し後の画像のみ」にする。画面には、チャットや他のプレイヤー名など、無関係な個人情報が映るため。`Profile.locate` は必須で、画面全体を送るのは `"full"` と明示したときだけ。テレメトリは持たない。Logfire は任意の依存で、既定では無効。キャッシュは `cache_dir` を指定したときだけ、そのディレクトリに書き、出力も指定したディレクトリにだけ書く。
 
 ### テスト
 
@@ -261,9 +280,9 @@ Typer で実装する。
 
 | コマンド | 用途 | 版 |
 | --- | --- | --- |
-| `framelift run <inputs...> --profile pkg.module:obj --model ... --out DIR [--screen-model ...]` | 抽出（`--screen-model` は 0.3） | 0.0.1 |
+| `framelift run <inputs...> --profile pkg.module:obj --model ... --out DIR [--screen-model ...] [--cache DIR]` | 抽出（`--screen-model` と `--cache` は 0.3） | 0.0.1 |
 | `framelift synth --out DIR --n 100 [--videos N]` | 合成サンプルの生成（`--videos` は 0.2） | 0.0.1 |
-| `framelift eval <dataset.yaml> --profile ... --model ... [--root DIR]` | 評価 | 0.1 |
+| `framelift eval <dataset.yaml> --profile ... --model ... [--root DIR] [--cache DIR]` | 評価（`--cache` は 0.3） | 0.1 |
 | `framelift frames <video or image> --out DIR [--profile ...] [--frame-rate] [--motion-threshold]` | モデルに送る画像と `frames.jsonl` だけを書き出して確認する（デバッグ用）。`--profile` で切り出しと塗りつぶしを適用する（`--profile` と静止画は 0.3） | 0.2 |
 
 ### パッケージングとリリース
@@ -284,7 +303,7 @@ Typer で実装する。
 | 0.0.1 | 画像入力、構造化抽出（検証・再試行）、`observations.jsonl`、合成サンプル（静止画）、CLI の `run`・`synth`（実装済み） |
 | 0.1 | 評価ハーネス（データセット形式、項目単位の評価器、`framelift eval`）、`Profile.item_key`、synth の `dataset.yaml`（実装済み） |
 | 0.2 | 動画入力、フレーム抽出と重複除去、集約と `items.jsonl`、合成動画、観測記録 v2（実装済み） |
-| 0.3 | 切り出し（`full` / `fixed`）と塗りつぶし、観測記録 v3、画面判定（実装済み）、キャッシュ |
+| 0.3 | 切り出し（`full` / `fixed`）と塗りつぶし、観測記録 v3、画面判定、キャッシュ（実装済み） |
 | 未定 | 総当たり比較、切り出しの `model` 戦略（要望が出てから） |
 | 1.0 | 最初の利用者での運用を経て、公開 API を確定 |
 
@@ -297,7 +316,8 @@ Typer で実装する。
 - 切り出しは `full` と `fixed` だけを入れ、`model` は要望が出てから（bbox を得るために画面全体をプロバイダに送るので、切り出し後の画像だけを送る方針と両立しない）
 - 公開 API は `Profile` と `Pipeline` の設定に限る（使われない拡張点を 0.x のうちに約束しない）
 - 合成サンプルの生成器を同梱し、公開ベンチマークに使う（実画面を公開せずに評価結果を示せる）
-- 抽出結果を画像ハッシュ・モデル・`Profile.version` で永続キャッシュする（評価の反復で同じ画像に課金しない）
+- 抽出と画面判定の結果を、送る画像のハッシュ・モデルの文字列・`Profile.fingerprint`（判定は `screen_description` と `Profile.version`）をキーに永続キャッシュし、評価の反復で同じ画像に課金しない。読み取った内容を知らない場所に残さないよう、`cache_dir` を指定したときだけ使う
+- 画面判定のキャッシュのキーは pHash にしない。当初は pHash の予定だったが、pHash は文字の違いを無視するので、配置の似た別の画面に判定を使い回してしまう
 - ライセンスは MIT（最も簡潔で、個人の OSS として利用者に説明しやすい）
 
 ## リスク

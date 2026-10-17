@@ -34,6 +34,7 @@ def _observation(index: int, *, status: str = "ok") -> Observation:
             ),
             "crop": None,
             "screen": None,
+            "cached": False,
             "data": {} if status == "ok" else None,
             "error": None if status == "ok" else "failed",
             "model": "m",

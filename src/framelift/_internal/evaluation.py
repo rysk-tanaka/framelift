@@ -14,6 +14,7 @@ from pydantic_core import to_json
 from pydantic_evals import Case, Dataset
 from pydantic_evals.evaluators import EvaluationReason, Evaluator, EvaluatorContext
 
+from framelift._internal.cache import Cache
 from framelift._internal.dataset import load_dataset
 from framelift._internal.extract import Extractor, model_label
 from framelift._internal.items import ItemKeyer, dump_item, item_keyer
@@ -375,9 +376,15 @@ def run_evaluation(
     *,
     max_retries: int = 2,
     progress: bool = True,
+    cache_dir: str | Path | None = None,
 ) -> EvaluationReport[CaseInputs, Output, Metadata]:
-    """Extract every case of a dataset from `build_dataset` and score the results."""
-    extractor = Extractor(profile, model, max_retries=max_retries)
+    """Extract every case of a dataset from `build_dataset` and score the results.
+
+    With ``cache_dir``, extractions are cached as in `Pipeline`; a case read from the cache keeps
+    the usage, retries and latency of the run that paid for it, so models still compare fairly.
+    """
+    cache = Cache(cache_dir) if cache_dir is not None else None
+    extractor = Extractor(profile, model, max_retries=max_retries, cache=cache)
     # The same image a run would send, so scores reflect what is cropped and redacted.
     layout = Layout.from_profile(profile)
 
