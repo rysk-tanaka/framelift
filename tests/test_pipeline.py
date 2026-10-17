@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
+import re
 import sys
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
@@ -11,19 +13,26 @@ from typing import Any
 import pytest
 from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.messages import (
     BinaryContent,
     ModelMessage,
+    ModelRequest,
     ModelResponse,
     ToolCallPart,
     UserPromptPart,
 )
+from pydantic_ai.models import ModelRequestParameters
+from pydantic_ai.models.fallback import FallbackModel
 from pydantic_ai.models.function import AgentInfo, FunctionModel
+from pydantic_ai.models.wrapper import WrapperModel
 
 from examples.fantasy_shop import profile as fantasy_shop_profile
 from framelift import Item, Observation, Pipeline, Profile
 from framelift import pipeline as pipeline_module
+from framelift._internal import cache as cache_module
 from framelift._internal import video as video_module
+from framelift._internal.extract import resolve_model
 from framelift._internal.screen import screen_image
 from framelift.observation import FrameRef
 
@@ -746,3 +755,259 @@ def test_the_screen_check_gets_the_sent_image_shrunk_once(samples, box) -> None:
     checked = _decoded(screen)
     assert checked.size == expected.size
     assert checked.tobytes() == expected.tobytes()
+
+
+LOCAL_SERVER = "http://localhost:1234/v1/"  # the default of AnsweringModel in conftest.py
+
+
+def test_another_model_answering_a_compatible_server_stops_the_run(
+    samples, tmp_path, monkeypatch, answering_model
+) -> None:
+    root, truths = samples
+    model = answering_model(_fixed_answer, model_name="qwen3")
+    # A cache id, as a model string has, so that the answer could be cached.
+    monkeypatch.setattr(cache_module, "model_cache_id", lambda model: "openai-chat:qwen3")
+
+    path = root / truths[0].file
+
+    with pytest.raises(UserError, match=r"'qwen3'.*'gemma-3'.*litellm:") as raised:
+        Pipeline(shop_profile, model=model, cache_dir=tmp_path / "cache").run(path)
+
+    assert raised.value.__notes__ == [f"Found while reading {path.as_posix()}"]
+    assert not (tmp_path / "cache").exists()  # the other model's answer is not cached
+
+
+def test_an_anonymized_run_names_the_input_by_its_hash(samples, answering_model) -> None:
+    root, truths = samples
+    path = root / truths[0].file
+    model = answering_model(_fixed_answer, model_name="qwen3")
+
+    with pytest.raises(UserError) as raised:
+        Pipeline(shop_profile, model=model, anonymize_paths=True).run(path)
+
+    sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
+    assert raised.value.__notes__ == [f"Found while reading {sha256}"]
+
+
+def test_another_model_is_stopped_before_any_retry(samples, answering_model) -> None:
+    root, truths = samples
+    requests: list[None] = []
+
+    def always_empty(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        requests.append(None)
+        return ModelResponse(
+            parts=[ToolCallPart(info.output_tools[0].name, {"shop_name": "x", "items": []})]
+        )
+
+    model = answering_model(always_empty, model_name="qwen3")
+
+    with pytest.raises(UserError, match="gemma-3"):
+        Pipeline(shop_profile, model=model, max_retries=2).run(root / truths[0].file)
+
+    assert len(requests) == 1  # no retry is paid for once another model is known to answer
+
+
+def test_another_model_answering_the_screen_check_stops_the_run(samples, answering_model) -> None:
+    root, truths = samples
+    profile = replace(shop_profile, screen_description="a shop's item list")
+    asked: list[str] = []
+
+    def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        asked.append(info.output_tools[0].name)
+        answer = {"is_target": True, "confidence": 0.9}
+        return ModelResponse(parts=[ToolCallPart("screen_check", answer)])
+
+    model = answering_model(respond, model_name="qwen3")
+
+    with pytest.raises(UserError, match="gemma-3"):
+        Pipeline(profile, model=model).run(root / truths[0].file)
+
+    assert asked == ["screen_check"]  # nothing is extracted
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "http://127.0.0.1:1234/v1/",
+        "http://127.1:1234/v1/",  # IPv4 shorthand
+        "http://[::1]:1234/v1/",
+        "http://192.168.1.20:1234/v1/",
+        "http://100.101.102.103:1234/v1/",  # Tailscale
+        "http://m6m:1234/v1/",
+        "http://m6m.tail1234.ts.net:1234/v1/",
+        "http://mac-mini.local:1234/v1/",
+        "http://mac-mini.local.:1234/v1/",  # fully qualified
+    ],
+)
+def test_another_model_is_caught_on_any_local_server(samples, answering_model, base_url) -> None:
+    root, truths = samples
+    model = answering_model(_fixed_answer, model_name="qwen3", base_url=base_url)
+
+    with pytest.raises(UserError, match="gemma-3"):
+        Pipeline(shop_profile, model=model).run(root / truths[0].file)
+
+
+@pytest.mark.parametrize("asked", ["lmstudio-community/", "@q4_k_m"])
+def test_a_name_with_nothing_left_to_compare_is_still_checked(
+    samples, answering_model, asked: str
+) -> None:
+    root, truths = samples
+    model = answering_model(_fixed_answer, model_name=asked)
+
+    with pytest.raises(UserError, match="gemma-3"):
+        Pipeline(shop_profile, model=model).run(root / truths[0].file)
+
+
+@pytest.mark.parametrize("asked", ["lmstudio-community/", "@q4_k_m"])
+def test_a_name_with_nothing_left_to_compare_matches_itself(
+    samples, answering_model, asked: str
+) -> None:
+    root, truths = samples
+    model = answering_model(_fixed_answer, model_name=asked, answered=asked)
+
+    result = Pipeline(shop_profile, model=model).run(root / truths[0].file)
+
+    assert [o.status for o in result.observations] == ["ok"]
+
+
+def test_a_streamed_answer_is_checked_too() -> None:
+    # Pydantic AI streams a run that has capabilities, so the check must not rely on request.
+    class LocalStream(FunctionModel):
+        """Asked for qwen3 on a local server; its stream is named after ``model_name=``."""
+
+        @property
+        def model_name(self) -> str:
+            return "qwen3"
+
+        @property
+        def system(self) -> str:
+            return "openai"
+
+        @property
+        def base_url(self) -> str | None:
+            return LOCAL_SERVER
+
+    async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str]:
+        yield "an answer"
+
+    model = resolve_model(LocalStream(stream_function=stream, model_name="gemma-3"))
+
+    async def read() -> None:
+        request = ModelRequest.user_text_prompt("a question")
+        async with model.request_stream([request], None, ModelRequestParameters()) as response:
+            async for _ in response:
+                pass
+
+    with pytest.raises(UserError, match=r"'qwen3'.*'gemma-3'"):
+        asyncio.run(read())
+
+
+def test_a_video_names_the_frame_another_model_answered(scrolling_video, answering_model) -> None:
+    path, _ = scrolling_video
+    model = answering_model(_fixed_answer, model_name="qwen3")
+
+    with pytest.raises(UserError) as raised:
+        Pipeline(shop_profile, model=model).run(path)
+
+    (note,) = raised.value.__notes__
+    assert re.fullmatch(
+        rf"Found while reading {re.escape(path.as_posix())} at frame \d+ \(\d+ ms\)", note
+    )
+
+
+def test_a_wrapped_model_is_checked_too(samples, answering_model) -> None:
+    root, truths = samples
+    model = WrapperModel(answering_model(_fixed_answer, model_name="qwen3"))
+
+    with pytest.raises(UserError, match="gemma-3"):
+        Pipeline(shop_profile, model=model).run(root / truths[0].file)
+
+
+@pytest.mark.parametrize(
+    ("asked", "answered", "system", "base_url"),
+    [
+        # A longer name that starts with the one asked, as an alias may be answered.
+        ("qwen3", "qwen3-2025-04-29", "openai", LOCAL_SERVER),
+        ("Qwen3", "qwen3-2025-04-29", "openai", LOCAL_SERVER),
+        # With or without the publisher, or as the model file's path.
+        ("gpt-oss-20b", "openai/gpt-oss-20b", "openai", LOCAL_SERVER),
+        ("openai/gpt-oss-20b", "gpt-oss-20b", "openai", LOCAL_SERVER),
+        ("qwen3-vl-8b", "/models/qwen3-vl-8b-q4_k_m.gguf", "openai", LOCAL_SERVER),
+        ("gemma-3", "C:\\models\\gemma-3-4b.gguf", "openai", LOCAL_SERVER),
+        # With the quantization asked for.
+        ("qwen3-vl-8b@q4_k_m", "qwen/qwen3-vl-8b", "openai", LOCAL_SERVER),
+        # No name to check.
+        ("qwen3", None, "openai", LOCAL_SERVER),
+        ("qwen3", "", "openai", LOCAL_SERVER),
+        # Not checked: servers that are not local, which may answer an alias or a deployment name
+        # with the name of the model behind it. OpenAI itself, regional hosts included, Azure,
+        # through its own provider or the OpenAI one, and a custom domain in front of it.
+        ("gpt-4o", "o3", "openai", "https://api.openai.com/v1/"),
+        ("gpt-4o", "o3", "openai", "https://us.api.openai.com/v1/"),
+        ("my-deployment", "gpt-4o-2024-11-20", "azure", "https://r.openai.azure.com/openai/"),
+        ("my-deployment", "gpt-4o-2024-11-20", "openai", "https://r.openai.azure.com/openai/v1/"),
+        (
+            "my-deployment",
+            "gpt-4o-2024-11-20",
+            "openai",
+            "https://r.cognitiveservices.azure.com/openai/v1/",
+        ),
+        ("my-deployment", "gpt-4o-2024-11-20", "openai", "https://r.openai.azure.cn/openai/v1/"),
+        ("my-deployment", "gpt-4o-2024-11-20", "openai", "https://r.openai.azure.us/openai/v1/"),
+        ("my-deployment", "gpt-4o-2024-11-20", "openai", "https://r.azure-api.net/openai/v1/"),
+        ("prod-chat", "gpt-4o-2024-11-20", "openai", "https://ai.example.com/openai/v1/"),
+        ("prod-chat", "gpt-4o-2024-11-20", "openai", "http://llm-gateway.internal/v1/"),
+        # Gateways that answer aliases with the names of the models behind.
+        (
+            "gemini-flash-latest",
+            "gemini-3.8-flash",
+            "openai",
+            "https://generativelanguage.googleapis.com/v1beta/openai/",
+        ),
+        ("gpt-5", "gpt-5-2025-08-07", "openai", "https://gateway-us.pydantic.dev/proxy/openai/"),
+    ],
+    ids=[
+        "prefix",
+        "case",
+        "publisher-added",
+        "publisher-dropped",
+        "file-path",
+        "windows-path",
+        "quantization",
+        "unnamed",
+        "empty",
+        "openai",
+        "openai-regional",
+        "azure",
+        "azure-v1",
+        "azure-cognitive-services",
+        "azure-china",
+        "azure-government",
+        "azure-api-management",
+        "custom-domain",
+        "internal-gateway",
+        "google",
+        "pydantic-gateway",
+    ],
+)
+def test_answers_that_may_name_another_model_are_read(
+    samples, answering_model, asked: str, answered: str | None, system: str, base_url: str
+) -> None:
+    root, truths = samples
+    model = answering_model(
+        _fixed_answer, model_name=asked, answered=answered, system=system, base_url=base_url
+    )
+
+    result = Pipeline(shop_profile, model=model).run(root / truths[0].file)
+
+    assert [o.status for o in result.observations] == ["ok"]
+
+
+def test_a_fallback_model_is_not_checked(samples, answering_model) -> None:
+    root, truths = samples
+    # Its responses come from whichever model answered, so no one name is asked.
+    model = FallbackModel(answering_model(_fixed_answer, model_name="qwen3"))
+
+    result = Pipeline(shop_profile, model=model).run(root / truths[0].file)
+
+    assert [o.status for o in result.observations] == ["ok"]

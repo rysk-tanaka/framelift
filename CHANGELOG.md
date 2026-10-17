@@ -14,6 +14,19 @@ All notable changes to this project are documented here. This project follows
 
 ### Changed
 
+- The cache keys include the URL of the server asked, so that `OPENAI_BASE_URL` pointing the
+  same model string at another server does not reuse its answers; entries made by 0.3.0 are not
+  used
+- On a local server (the `openai` provider pointed at `localhost`, a private or Tailscale
+  address, or a local network name), a response naming a model that does not start with the one
+  asked for stops the run with a `UserError` before any retry, instead of recording and caching
+  another model's answer as the one asked for; `framelift eval` sends no further cases and
+  raises it at the end
+- `Pipeline` resolves the model when it is created, so errors such as a missing API key are
+  raised there instead of in `run`, and a run needs the API key even when every image is cached,
+  unless `OPENAI_BASE_URL` is set, which needs none
+- `framelift run` and `framelift eval` print a missing API key and another model answering, and
+  exit with code 2 instead of showing a traceback
 - `framelift synth` lists the screenshots and videos it writes, with their SHA-256, in
   `synth.sha256`; run again in the same directory, it removes the files listed there that still
   match and that it did not write again (in the other format, or past `--n` or `--videos`), so

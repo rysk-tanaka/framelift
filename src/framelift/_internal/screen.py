@@ -14,7 +14,7 @@ from pydantic_ai.exceptions import UnexpectedModelBehavior
 from pydantic_ai.usage import RunUsage
 
 from framelift._internal.cache import ScreenEntry, cache_key
-from framelift._internal.extract import model_label
+from framelift._internal.extract import model_label, resolve_model
 from framelift._internal.layout import encode_png
 from framelift.observation import Screen, Usage
 
@@ -62,10 +62,12 @@ class ScreenClassifier:
     ) -> None:
         self._description = description
         self._version = version
-        self._model = model
+        self._label = model_label(model)
+        # Resolved once, so the server in the cache key is the one asked.
+        self._model = resolve_model(model)
         self._max_retries = max_retries
         self._cache = cache
-        self._model_id = None if cache is None else cache.model_id(model)
+        self._model_id = None if cache is None else cache.model_id(model, self._model)
         self._agent: Agent[None, ScreenCheck] = Agent(
             # A name of its own: with the default, the check and the extraction would both
             # answer through "final_result", and a model given both could not tell them apart.
@@ -77,7 +79,8 @@ class ScreenClassifier:
 
     def classify(self, image: ImageSource) -> Screen:
         """Check one image, or take the answer from the cache. A check that gets no valid answer
-        after every retry is returned, not raised, with the usage it took."""
+        after every retry is returned, not raised, with the usage it took; a local server
+        answering with another model raises `ModelMismatchError`, as in `Extractor.extract`."""
         # The upright, redacted and cropped image, not ``data``: an image sent as it is keeps
         # its EXIF rotation and color mode there, which a PNG could not hold as they are.
         data = screen_image(image.view)
@@ -88,7 +91,10 @@ class ScreenClassifier:
             None
             if self._model_id is None
             else cache_key(
-                hashlib.sha256(data).hexdigest(), self._model_id, self._description, self._version
+                hashlib.sha256(data).hexdigest(),
+                *self._model_id,
+                self._description,
+                self._version,
             )
         )
         cached = self._cached(key)
@@ -111,7 +117,7 @@ class ScreenClassifier:
         return Screen(
             is_target=None if check is None else check.is_target,
             confidence=None if check is None else check.confidence,
-            model=model_label(self._model),
+            model=self._label,
             usage=Usage(
                 input_tokens=usage.input_tokens,
                 output_tokens=usage.output_tokens,
@@ -132,7 +138,7 @@ class ScreenClassifier:
         return Screen(
             is_target=entry.is_target,
             confidence=entry.confidence,
-            model=model_label(self._model),
+            model=self._label,
             usage=Usage(
                 input_tokens=entry.input_tokens,
                 output_tokens=entry.output_tokens,

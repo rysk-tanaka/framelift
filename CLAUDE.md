@@ -57,8 +57,10 @@ Pipeline.run(inputs)
   → Extractor.observe: Pydantic AI の Agent に output_type と画像（BinaryContent）を渡し、Observation（v3。source・frame・crop・screen・cached）を作る
       Profile.validators を output_validator に登録し、ModelRetry で再試行
       再試行を使い切ったら status: "error"。1 枚の失敗で全体は止めない
+      モデルは Extractor・ScreenClassifier の構築時に infer_model で 1 度だけ解決し、その Model で問い合わせる
+      ローカルのサーバー（system が openai で、ホストが localhost・プライベートや Tailscale のアドレス・ドットのない名前・.local などのローカルの名前。is_local_server）では、resolve_model がモデルを _NameChecked で包み、応答ごとに model_name が指定で始まるか（大文字・小文字は区別しない）を確かめる。始まらなければ再試行の前に ModelMismatchError（UserError）で実行を止める（判定も同じ）。CLI は、構築時の UserError（API キーがないなど）と実行中の ModelMismatchError を終了コード 2 のメッセージにする（eval は実行中の UserError もすべて）
       読めない画像・動画（途中で壊れた動画、フレームのない動画を含む）は status: "error"、frame: null の観測にして次へ進む
-      cache_dir があれば、抽出と判定の結果をキャッシュ（_internal/cache.py）から読み、成功した結果を書く。キーは CACHE_REVISION・送る画像の sha256・モデルの文字列・fingerprint（判定は縮小画像の sha256・モデルの文字列・screen_description・version）。framelift のプロンプトや判定の出力を変えたら CACHE_REVISION を上げる
+      cache_dir があれば、抽出と判定の結果をキャッシュ（_internal/cache.py）から読み、成功した結果を書く。キーは CACHE_REVISION・送る画像の sha256・モデルの文字列・接続先の URL（解決した Model の base_url）・fingerprint（判定は縮小画像の sha256・モデルの文字列・接続先の URL・screen_description・version）。framelift のプロンプトや判定の出力を変えたら CACHE_REVISION を上げる
       Model のインスタンスはキャッシュしない（警告 1 回）。復元したモデルが元と厳密に同じ状態（same_state）のときだけ書く。ヒットした観測は cached: true で、usage は元の実行のもの
   → out_dir があれば observations.jsonl に 1 行ずつ追記
   → item_key があれば Aggregator で項目をキーごとに束ねて多数決し、items.jsonl に書く
@@ -69,6 +71,7 @@ framelift eval（framelift[eval] が必要）
   → pydantic-evals の Dataset を組み、各ケースで load_image（Profile の Layout を適用）と Extractor.observe_async を 1 件ずつ実行（評価のイベントループ上で非同期に動かす）
       出力は Observation と検証済みのモデル。項目のキーはこのモデルから取り、保存した JSON を検証し直さない
       読んだ入力ファイルの sha256 をもう一度照合し、照合後に差し替わっていたらそのケースを失敗にする（送る画像は切り出すと別の PNG になるので、入力ファイルのハッシュで比べる）
+      ローカルのサーバーが別のモデルで答えたら（ModelMismatchError）、後のケースを送らず、評価の後で投げ直す
   → 評価器（検証の通過、フィールド一致率、item_key による適合率・再現率、usage）でレポートを出す
       ケースや評価器が異常終了したら終了コード 1。スコアが低いだけなら 0
 ```
@@ -122,9 +125,10 @@ framelift eval（framelift[eval] が必要）
 ### テスト
 
 - `live` マーカーのテスト（`tests/test_live.py`）以外は実モデルを呼ばない。`tests/conftest.py` で `models.ALLOW_MODEL_REQUESTS = False` にしていて、live テストだけがテストの中で `True` に戻す
+- ローカルのサーバーの接続先や応答のモデル名が要るテストは、`tests/conftest.py` の `answering_model` フィクスチャ（`AnsweringModel`）でモデルを作る
 - モデルの応答は `FunctionModel` で組み立てる。出力はツール呼び出しなので、`ToolCallPart(info.output_tools[0].name, {...})` で返す
 - 再試行の確認は、1 回目に検証を通らない値、2 回目に正しい値を返す `FunctionModel` で行う
-- CLI のテストは `--model test`（Pydantic AI 組み込みのテスト用モデル）と `typer.testing.CliRunner` を使う
+- CLI のテストは `--model test`（Pydantic AI 組み込みのテスト用モデル）と `typer.testing.CliRunner` を使う。モデルの文字列の解決を確かめるテストだけは `openai:<name>` などを渡し、`extract.infer_model` を差し替えるか、`OPENAI_*` の環境変数を `monkeypatch` で決める
 - 画像は `samples` フィクスチャ（`synth.generate`）、動画は `scrolling_video` フィクスチャ（`synth.generate_video`）で作る。テスト用の画像・動画ファイルを置かない
 - 実モデルを使うテストには `@pytest.mark.live` を付ける（既定では実行されない）
 

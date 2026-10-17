@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.messages import (
     BinaryContent,
     ModelMessage,
@@ -26,6 +27,9 @@ from examples.fantasy_shop import profile as fantasy_shop_profile
 from framelift import Pipeline, Profile
 from framelift._internal import cache as cache_module
 from framelift._internal.cache import Cache, ExtractEntry, cache_key, same_state
+from framelift._internal.extract import Extractor, check_model_name, is_local_server
+from framelift._internal.layout import Layout
+from framelift._internal.sources import load_image
 
 shop_profile = replace(fantasy_shop_profile, locate="full")
 ANSWER = {"shop_name": "A", "items": [{"name": "a", "price": 1}]}
@@ -418,6 +422,54 @@ def test_another_screen_description_is_checked_again(samples, tmp_path: Path, mo
     assert asked == ["screen_check", "final_result", "screen_check"]
 
 
+def test_another_server_is_asked_again(samples, tmp_path: Path, model_ids, answering_model) -> None:
+    root, truths = samples
+    profile = replace(shop_profile, screen_description="a shop's item list")
+    asked: list[str] = []
+
+    def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        name = info.output_tools[0].name
+        asked.append(name)
+        answer = {"is_target": True, "confidence": 0.9} if name == "screen_check" else ANSWER
+        return ModelResponse(parts=[ToolCallPart(name, answer)])
+
+    # The same model id, as the same model string would give, on two servers.
+    for url in (
+        "http://localhost:1234/v1/",
+        "http://192.0.2.1:1234/v1/",
+        "http://localhost:1234/v1/",
+    ):
+        # Not an OpenAI-compatible server, so that only the URL differs.
+        model = answering_model(respond, system="function", answered=None, base_url=url)
+        Pipeline(profile, model=model, cache_dir=tmp_path).run(root / truths[0].file)
+
+    # Both the check and the extraction are asked again on the second server, and not on the
+    # first one again.
+    assert asked == ["screen_check", "final_result"] * 2
+
+
+def test_a_model_string_takes_its_server_from_the_environment(
+    samples, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, truths = samples
+    image = load_image(root / truths[0].file, Layout.full())
+    monkeypatch.setenv("OPENAI_API_KEY", "not-sent")  # nothing is asked
+    keys = []
+    for url in ("http://localhost:1234/v1", "http://192.0.2.1:1234/v1"):
+        monkeypatch.setenv("OPENAI_BASE_URL", url)
+        extractor = Extractor(
+            shop_profile, "openai-chat:qwen3", max_retries=0, cache=Cache(tmp_path)
+        )
+        keys.append(extractor._cache_key(image))
+        # The server found is one the model name is checked on.
+        assert is_local_server(extractor._model)
+        with pytest.raises(UserError, match="gemma-3"):
+            check_model_name(extractor._model, ModelResponse(parts=[], model_name="gemma-3"))
+
+    assert None not in keys
+    assert keys[0] != keys[1]
+
+
 class Private(BaseModel):
     value: int
     _note: str = PrivateAttr(default="")
@@ -609,7 +661,10 @@ def test_an_output_model_that_raises_on_its_cached_json_does_not_stop_the_run(
     assert _entries(tmp_path) == []
     # Reading: an entry in the by-name form, which this model cannot validate, is a miss.
     key = cache_key(
-        hashlib.sha256(path.read_bytes()).hexdigest(), "function-model", profile.fingerprint
+        hashlib.sha256(path.read_bytes()).hexdigest(),
+        "function-model",
+        "",  # a FunctionModel names no server
+        profile.fingerprint,
     )
     entry = ExtractEntry(
         input=json.dumps({"shop_name": "A", "items": answer["items"]}),
