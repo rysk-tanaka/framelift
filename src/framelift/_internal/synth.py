@@ -11,7 +11,8 @@ import io
 import random
 from dataclasses import asdict, dataclass
 from fractions import Fraction
-from typing import TYPE_CHECKING, Literal
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
@@ -21,7 +22,6 @@ from framelift._internal.video import import_av
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
-    from pathlib import Path
 
 Orientation = Literal["portrait", "landscape"]
 
@@ -102,35 +102,124 @@ def render(truth: SampleTruth) -> Image.Image:
 
 DATASET_FILE = "dataset.yaml"
 
+MIN_SCALE, MAX_SCALE = 0.1, 4.0
+MAX_NOISE = 64.0
+MIN_JPEG_QUALITY, MAX_JPEG_QUALITY = 1, 95
+# The defaults draw the screens as they are; generate() records only settings that differ.
+DEFAULT_SCALE, DEFAULT_NOISE = 1.0, 0.0
 
-def _to_case(truth: SampleTruth, data: bytes) -> DatasetCase:
-    width, height = _SIZES[truth.orientation]
+
+def check_scale(scale: float) -> float:
+    """Return ``scale``, or raise `ValueError` unless it is from 0.1 to 4 (NaN is rejected too).
+
+    Below 0.1 the text is too small to read, and much smaller factors would round a side down to
+    no pixels at all."""
+    if not MIN_SCALE <= scale <= MAX_SCALE:
+        raise ValueError(f"scale must be from {MIN_SCALE} to {MAX_SCALE}, got {scale}")
+    return scale
+
+
+def check_noise(noise: float) -> float:
+    """Return ``noise``, or raise `ValueError` unless it is from 0 to 64 (NaN is rejected too)."""
+    if not 0 <= noise <= MAX_NOISE:
+        raise ValueError(f"noise must be from 0 to {MAX_NOISE}, got {noise}")
+    return noise
+
+
+def check_jpeg_quality(jpeg_quality: int | None) -> int | None:
+    """Return ``jpeg_quality``, or raise `ValueError` unless it is None or an integer from 1 to
+    95; Pillow itself takes any number."""
+    is_quality = (
+        isinstance(jpeg_quality, int)
+        and not isinstance(jpeg_quality, bool)
+        and MIN_JPEG_QUALITY <= jpeg_quality <= MAX_JPEG_QUALITY
+    )
+    if jpeg_quality is not None and not is_quality:
+        raise ValueError(
+            f"jpeg_quality must be an integer from {MIN_JPEG_QUALITY} to {MAX_JPEG_QUALITY}, "
+            f"got {jpeg_quality!r}"
+        )
+    return jpeg_quality
+
+
+def _degrade(
+    image: Image.Image, *, scale: float, noise: float, rng: np.random.Generator
+) -> Image.Image:
+    if scale != 1:
+        width, height = image.size
+        size = (round(width * scale), round(height * scale))
+        image = image.resize(size, Image.Resampling.LANCZOS)
+    if noise:
+        # One float32 array, worked on in place: at scale 4 a screen has 44 million values, and
+        # float64 temporaries would take about a gigabyte. The image is added as uint8, unconverted.
+        pixels = rng.standard_normal((*image.size[::-1], 3), dtype=np.float32)
+        pixels *= noise
+        np.add(pixels, np.asarray(image), out=pixels)
+        np.rint(pixels, out=pixels)
+        np.clip(pixels, 0, 255, out=pixels)
+        image = Image.fromarray(pixels.astype(np.uint8))
+    return image
+
+
+def _to_case(
+    truth: SampleTruth, data: bytes, size: tuple[int, int], degradation: dict[str, Any]
+) -> DatasetCase:
+    width, height = size
     return DatasetCase(
-        name=truth.file.removesuffix(".png"),
+        name=Path(truth.file).stem,
         image=truth.file,
         sha256=hashlib.sha256(data).hexdigest(),
         expected={"shop_name": truth.shop_name, "items": [asdict(i) for i in truth.items]},
-        metadata={"orientation": truth.orientation, "width": width, "height": height},
+        metadata={"orientation": truth.orientation, "width": width, "height": height} | degradation,
     )
 
 
-def generate(out_dir: Path, *, n: int, seed: int = 0) -> list[SampleTruth]:
-    """Write ``n`` PNG screenshots and a ``dataset.yaml`` with their ground truth."""
+def generate(
+    out_dir: Path,
+    *,
+    n: int,
+    seed: int = 0,
+    scale: float = DEFAULT_SCALE,
+    noise: float = DEFAULT_NOISE,
+    jpeg_quality: int | None = None,
+) -> list[SampleTruth]:
+    """Write ``n`` screenshots and a ``dataset.yaml`` with their ground truth.
+
+    Each screen is resized by ``scale`` (0.1-4), gets Gaussian noise with a standard deviation of
+    ``noise`` (in 0-255 pixel values, up to 64) and is saved as a JPEG of ``jpeg_quality`` (1-95)
+    instead of a PNG, in that order, like a screen captured on a device and then compressed. The
+    defaults write the screens as drawn. The ground truth depends only on ``seed``.
+    """
     if n < 1:
         raise ValueError("n must be >= 1")
+    check_scale(scale)
+    check_noise(noise)
+    check_jpeg_quality(jpeg_quality)
     out_dir.mkdir(parents=True, exist_ok=True)
     rng = random.Random(seed)
+    # A stream of its own, so that noise does not change the items drawn. Seeded through a string,
+    # as numpy takes no negative seed.
+    noise_rng = np.random.default_rng(random.Random(f"{seed}:noise").getrandbits(64))
+    suffix = ".png" if jpeg_quality is None else ".jpg"
+    # Only what differs from the defaults, so that the default dataset.yaml stays as it was.
+    settings = {"scale": scale, "noise": noise, "jpeg_quality": jpeg_quality}
+    defaults = {"scale": DEFAULT_SCALE, "noise": DEFAULT_NOISE, "jpeg_quality": None}
+    degradation = {key: value for key, value in settings.items() if value != defaults[key]}
     truths: list[SampleTruth] = []
     cases: list[DatasetCase] = []
     for index in range(n):
         orientation: Orientation = "portrait" if index % 2 == 0 else "landscape"
-        truth = _random_truth(rng, f"shop-{index:03d}.png", orientation)
+        truth = _random_truth(rng, f"shop-{index:03d}{suffix}", orientation)
+        image = _degrade(render(truth), scale=scale, noise=noise, rng=noise_rng)
         buffer = io.BytesIO()
-        render(truth).save(buffer, format="PNG")
+        if jpeg_quality is None:
+            image.save(buffer, format="PNG")
+        else:
+            image.save(buffer, format="JPEG", quality=jpeg_quality)
         data = buffer.getvalue()
         (out_dir / truth.file).write_bytes(data)
         truths.append(truth)
-        cases.append(_to_case(truth, data))
+        cases.append(_to_case(truth, data, image.size, degradation))
     write_dataset(out_dir / DATASET_FILE, cases)
     return truths
 

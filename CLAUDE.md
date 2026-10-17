@@ -29,6 +29,7 @@ uv run pytest -m live                  # 実モデルを呼ぶテスト（API �
 
 # CLI の動作確認（"test" は Pydantic AI 組み込みの、プロバイダを呼ばないモデル）
 uv run framelift synth --out /tmp/samples --n 3 --videos 1
+uv run framelift synth --out /tmp/samples-jpeg --n 3 --scale 0.5 --noise 8 --jpeg-quality 70
 uv run framelift run /tmp/samples --profile examples.fantasy_shop:profile --model test --out /tmp/out
 uv run framelift frames /tmp/samples/shop-scroll-000.mp4 --out /tmp/frames
 uv run framelift frames /tmp/samples/shop-000.png --profile examples.fantasy_shop:profile --out /tmp/frames
@@ -89,7 +90,7 @@ framelift eval（framelift[eval] が必要）
   - `fields.py` — 出力モデルのフィールドから、モデル型・モデルの一覧型を見分ける（`| None` と `Annotated` を外す）
   - `dataset.py` — 評価用データセット（`framelift/dataset/v1`）の読み書きと sha256 照合。pydantic-evals に依存しない
   - `evaluation.py` — pydantic-evals による評価と評価器
-  - `synth.py` — 架空のショップ画面と正解（`dataset.yaml`）、スクロールする合成動画の生成
+  - `synth.py` — 架空のショップ画面と正解（`dataset.yaml`）、スクロールする合成動画の生成。静止画は拡大・縮小、ノイズ、JPEG の順に劣化させられる
 - `examples/fantasy_shop.py` — 合成サンプル用の Profile の例
 
 ## 設計上の原則

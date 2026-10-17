@@ -194,6 +194,15 @@ framelift eval samples/dataset.yaml --profile examples.fantasy_shop:profile \
   --model anthropic:<model-name>
 ```
 
+To score reading under conditions closer to real screenshots, `synth` can resize the screens
+(`--scale`, 0.1-4), add Gaussian noise (`--noise`, 0-64, a standard deviation in 0-255 pixel values)
+and save them as JPEG (`--jpeg-quality`, 1-95), in that order. The ground truth stays the same
+for the same `--seed`:
+
+```bash
+framelift synth --out samples-jpeg --n 20 --scale 0.5 --noise 8 --jpeg-quality 70
+```
+
 A dataset lists each image (relative to the dataset root), its SHA-256 and the expected output,
 which lists every required field (fields with defaults may be left out):
 

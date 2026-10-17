@@ -5,6 +5,13 @@ All notable changes to this project are documented here. This project follows
 
 ## [Unreleased]
 
+### Added
+
+- `framelift synth --scale`, `--noise` and `--jpeg-quality` resize the screenshots, add Gaussian
+  noise and save them as JPEG; `dataset.yaml` records the size and the settings that differ from
+  the defaults in each case's metadata, while the ground truth and the default output stay the
+  same
+
 ## [0.3.0] - 2026-10-17
 
 ### Added
