@@ -56,6 +56,36 @@ def test_synth_then_run_with_the_test_model(
     assert all(Observation.model_validate_json(line).status == "ok" for line in lines)
 
 
+def test_run_twice_with_a_cache_reads_the_second_time_from_it(
+    samples, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(Path(__file__).resolve().parents[1])
+    root, _ = samples
+    out = tmp_path / "out"
+    args = [
+        "run",
+        str(root),
+        "--profile",
+        "examples.fantasy_shop:profile",
+        "--model",
+        "test",
+        "--out",
+        str(out),
+        "--cache",
+        str(tmp_path / "cache"),
+    ]
+
+    first = runner.invoke(app, args)
+    second = runner.invoke(app, args)
+
+    assert first.exit_code == 0, first.output
+    assert "3 ok (0 from cache)" in first.output
+    assert second.exit_code == 0, second.output
+    assert "3 ok (3 from cache)" in second.output
+    lines = (out / "observations.jsonl").read_text().splitlines()
+    assert all(Observation.model_validate_json(line).cached for line in lines)
+
+
 @pytest.mark.parametrize(
     "spec", ["no_colon", "examples.fantasy_shop:missing", "framelift:Pipeline"]
 )

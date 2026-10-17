@@ -53,10 +53,12 @@ Pipeline.run(inputs)
   → Profile.screen_description があれば ScreenClassifier.classify: 送る画像（ImageSource.view）を長辺 512px に縮小した PNG で対象画面か判定する
       出力ツール名は screen_check（抽出の final_result と見分けるため）。モデルは screen_model（省略時は model）
       対象外なら status: "skipped"、判定の失敗なら status: "error" の観測にして抽出しない。判定の結果と usage は観測の screen に残す
-  → Extractor.observe: Pydantic AI の Agent に output_type と画像（BinaryContent）を渡し、Observation（v3。source・frame・crop・screen）を作る
+  → Extractor.observe: Pydantic AI の Agent に output_type と画像（BinaryContent）を渡し、Observation（v3。source・frame・crop・screen・cached）を作る
       Profile.validators を output_validator に登録し、ModelRetry で再試行
       再試行を使い切ったら status: "error"。1 枚の失敗で全体は止めない
       読めない画像・動画（途中で壊れた動画、フレームのない動画を含む）は status: "error"、frame: null の観測にして次へ進む
+      cache_dir があれば、抽出と判定の結果をキャッシュ（_internal/cache.py）から読み、成功した結果を書く。キーは CACHE_REVISION・送る画像の sha256・モデルの文字列・fingerprint（判定は縮小画像の sha256・モデルの文字列・screen_description・version）。framelift のプロンプトや判定の出力を変えたら CACHE_REVISION を上げる
+      Model のインスタンスはキャッシュしない（警告 1 回）。復元したモデルが元と厳密に同じ状態（same_state）のときだけ書く。ヒットした観測は cached: true で、usage は元の実行のもの
   → out_dir があれば observations.jsonl に 1 行ずつ追記
   → item_key があれば Aggregator で項目をキーごとに束ねて多数決し、items.jsonl に書く
 
@@ -80,6 +82,7 @@ framelift eval（framelift[eval] が必要）
   - `video.py` — 動画の標本取り、静止区間の判定、代表フレームの選択（PyAV を遅延 import する）
   - `layout.py` — 送る画像を作る（EXIF の向きと色空間の正規化、塗りつぶし、切り出し）。`NoCropError`
   - `screen.py` — 画面判定（`ScreenClassifier`・`ScreenCheck`・`screen_image`）
+  - `cache.py` — 抽出と画面判定のキャッシュ（`Cache`・`model_cache_id`・`same_state`）。テストでは `model_cache_id` を差し替えて `FunctionModel` にも識別子を与える
   - `items.py` — `item_key` による項目のキー計算と dump。評価と集約で共有する
   - `aggregate.py` — 複数フレームの項目の多数決と `Item` の組み立て
   - `extract.py` — Pydantic AI による抽出と Observation の組み立て
@@ -102,7 +105,7 @@ framelift eval（framelift[eval] が必要）
 
 設計の詳細と判断の理由は [docs/README.md](docs/README.md) から辿れる。
 
-- 0.3 — 切り出し（`full`・`fixed`）と塗りつぶし、画面判定（実装済み）、抽出結果のキャッシュ。総当たり比較と切り出しの `model` 戦略は要望が出てから
+- 0.3 — 切り出し（`full`・`fixed`）と塗りつぶし、画面判定、抽出結果のキャッシュ（実装済み）。総当たり比較と切り出しの `model` 戦略は要望が出てから
 - 1.0 — 公開 API の確定
 
 ## コーディング規約

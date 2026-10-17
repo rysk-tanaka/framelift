@@ -175,3 +175,9 @@ def test_the_screen_description_does_not_change_the_fingerprint() -> None:
     )
 
     assert checked.fingerprint == base.fingerprint
+
+
+def test_a_lone_surrogate_still_has_a_fingerprint() -> None:
+    profile = Profile(name="p", output_type=Out, instructions="read \ud800", locate="full")
+
+    assert len(profile.fingerprint) == 64

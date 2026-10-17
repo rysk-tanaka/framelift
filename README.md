@@ -19,14 +19,13 @@ framelift turns screenshots and screen recordings into validated, provenance-tag
 - Only the part of the screen you choose is sent: crop each orientation to a box and paint over
   areas such as a chat window before anything leaves your machine
 - An optional screen check: images of other screens are skipped before extraction
+- An optional cache, so a run or an evaluation repeated on the same images is not paid for again
 - `observations.jsonl` output with source, frame, crop, usage and retry information per image or
   frame
 - `items.jsonl`: list items seen in several frames merged by majority vote, with disagreements kept
 - An evaluation harness built on [pydantic-evals](https://ai.pydantic.dev/evals/): score a profile
   and a model against images with expected outputs
 - A synthetic sample generator (a fictional shop screen, still or scrolling) for demos and tests
-
-Planned for 0.3: caching.
 
 ## Install
 
@@ -85,6 +84,7 @@ Each line of `out/observations.jsonl` is one image or video frame:
  "frame": {"index": 1, "timestamp_ms": 3000, "sha256": "…", "phash": "…"},
  "crop": {"orientation": "landscape", "size": [1280, 720], "bbox": [0.0, 0.0, 1.0, 0.9], "redact": []},
  "screen": null,
+ "cached": false,
  "data": {"shop_name": "…", "items": [{"name": "…", "price": 120}]},
  "error": null,
  "model": "anthropic:<model-name>",
@@ -150,6 +150,37 @@ extracted; one the check cannot answer is an error. The check's answer and its t
 the observation's `screen`, apart from the extraction's `usage`. `screen_model` (`--screen-model`
 on the command line) defaults to the extraction model. Evaluation does not check screens: its
 cases are all target screens.
+
+## Cache
+
+Pass a directory to cache extractions and screen checks in, and images read before are not paid
+for again:
+
+```bash
+framelift run samples --profile examples.fantasy_shop:profile \
+  --model anthropic:<model-name> --out out --cache .framelift-cache
+```
+
+(`Pipeline(..., cache_dir=".framelift-cache")` in Python, `framelift eval --cache` for
+evaluations.) An extraction is keyed by the image sent, the model string and the profile's
+`fingerprint`, and a screen check by the shrunk image checked, the model string, the screen
+description and `Profile.version`. So changing the crop, the model, the instructions, the output
+model or `Profile.version` reads the image again, and changing the description or the version
+checks it again. A framelift release that changes its own prompts does not reuse older entries. Validators are code and
+not part of the key: bump `Profile.version` when you change them, and keep them deterministic.
+Only successful results are cached, and only for models given as strings: a `Model` instance
+cannot be told apart from another with different settings, so it is not cached, and a warning says so.
+An answer that needed more retries than the current `max_retries` is not reused.
+
+A cached observation has `"cached": true` and keeps the usage, retries and latency of the run
+that paid for it, so evaluation reports still compare models fairly; a screen check taken from the
+cache has `"cached": true` in `screen`. The run summary says how many of the extractions came from
+the cache. An output that would not come back exactly as it was from its JSON (for
+example one with a `Field(exclude=True)` value or a private attribute set) is not cached; fields
+excluded from dumps are never written to the cache. Neither is an output with a `set` or
+`frozenset` field of two or more items in practice: their order, and so the JSON they dump to,
+changes from one process to the next, so the entry a run writes is not found by the next one. Use
+a list where the cache matters. Delete the directory to clear it.
 
 ## Evaluate
 
@@ -217,7 +248,7 @@ Evaluation crops and redacts the same way, so scores reflect what a run sends.
 
 framelift runs locally and only sends the cropped and redacted images, from the files you pass
 and the frames it picks from your videos, to the model provider you choose.
-It has no telemetry.
+It has no telemetry. It writes only to the output and cache directories you give it.
 
 ## Development
 

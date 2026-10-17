@@ -71,6 +71,7 @@ class Screen(_Record):
     model: str
     usage: Usage = Field(description="Tokens the check took, apart from the extraction's")
     error: str | None = None
+    cached: bool = Field(description="Read from the cache; usage is that of the original check")
 
 
 class Observation(_Record):
@@ -92,6 +93,10 @@ class Observation(_Record):
     screen: Screen | None = Field(
         description="The screen check; null when the profile has no screen_description or "
         "nothing was sent"
+    )
+    cached: bool = Field(
+        description="The extraction was read from the cache; usage, retries and latency are "
+        "those of the original run"
     )
     data: dict[str, Any] | None = Field(description="The validated output; null unless ok")
     error: str | None = None

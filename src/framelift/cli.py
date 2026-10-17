@@ -149,6 +149,13 @@ def run(
     ] = False,
     frame_rate: FrameRate = _video.DEFAULT_FRAME_RATE,
     motion_threshold: MotionThreshold = _video.DEFAULT_MOTION_THRESHOLD,
+    cache: Annotated[
+        Path | None,
+        typer.Option(
+            help="Directory to cache extractions and screen checks in, so that images read "
+            "before are not paid for again [default: no cache]"
+        ),
+    ] = None,
 ) -> None:
     """Extract data from images and videos; write observations.jsonl and items.jsonl."""
     loaded = load_profile(profile)
@@ -162,6 +169,7 @@ def run(
             anonymize_paths=anonymize_paths,
             frame_rate=frame_rate,
             motion_threshold=motion_threshold,
+            cache_dir=cache,
         )
     except ValueError as exc:
         # The other settings are checked by their options first; only a --screen-model for a
@@ -176,9 +184,10 @@ def run(
     except _video.MissingVideoExtraError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=2) from exc
+    from_cache = f" ({len(result.cached)} from cache)" if cache is not None else ""
     typer.echo(
-        f"{len(result.succeeded)} ok, {len(result.skipped)} skipped, {len(result.failed)} failed "
-        f"-> {result.output_path}",
+        f"{len(result.succeeded)} ok{from_cache}, {len(result.skipped)} skipped, "
+        f"{len(result.failed)} failed -> {result.output_path}",
         err=True,
     )
     if result.items_path is not None:
@@ -206,6 +215,13 @@ def evaluate(
         ),
     ] = None,
     max_retries: Annotated[int, typer.Option(min=0, help="Retries when validation fails")] = 2,
+    cache: Annotated[
+        Path | None,
+        typer.Option(
+            help="Directory to cache extractions in, so that a repeated evaluation does not pay "
+            "for the same images again [default: no cache]"
+        ),
+    ] = None,
 ) -> None:
     """Score a profile and a model against a dataset of images with expected outputs."""
     # Imported here because pydantic-evals is an optional extra.
@@ -222,7 +238,9 @@ def evaluate(
         cases = evaluation.build_dataset(dataset, loaded, root)
     except (OSError, ValueError) as exc:
         raise typer.BadParameter(str(exc), param_hint="DATASET") from exc
-    report = evaluation.run_evaluation(cases, loaded, model, max_retries=max_retries)
+    report = evaluation.run_evaluation(
+        cases, loaded, model, max_retries=max_retries, cache_dir=cache
+    )
     report.print(include_averages=True, include_reasons=True)
     # Low scores are results, but a case or evaluator that crashed means the run is incomplete.
     is_incomplete = bool(report.failures) or any(c.evaluator_failures for c in report.cases)

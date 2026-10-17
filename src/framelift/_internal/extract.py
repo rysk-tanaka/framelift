@@ -12,6 +12,7 @@ from pydantic_ai.exceptions import UnexpectedModelBehavior
 from pydantic_ai.messages import RetryPromptPart
 from pydantic_ai.usage import RunUsage
 
+from framelift._internal.cache import ExtractEntry, cache_key, json_sha256, same_state
 from framelift.observation import FrameRef, Observation, ProfileRef, SourceRef, Usage
 
 if TYPE_CHECKING:
@@ -20,6 +21,7 @@ if TYPE_CHECKING:
     from pydantic_ai.messages import ModelMessage
     from pydantic_ai.models import Model
 
+    from framelift._internal.cache import Cache
     from framelift._internal.sources import ImageSource
     from framelift.observation import Crop, Screen
     from framelift.profile import Profile, Validator
@@ -37,6 +39,8 @@ class Extraction[OutputT: BaseModel]:
     requests: int
     retries: int
     latency_ms: int
+    cached: bool = False
+    """Read from the cache: the usage, retries and latency are those of the original run."""
 
 
 def _adapt[OutputT: BaseModel](validator: Validator[OutputT]):
@@ -81,9 +85,21 @@ def _extraction[OutputT: BaseModel](
 class Extractor[OutputT: BaseModel]:
     """Reads one image into ``profile.output_type``, retrying when validation fails."""
 
-    def __init__(self, profile: Profile[OutputT], model: Model | str, *, max_retries: int) -> None:
+    def __init__(
+        self,
+        profile: Profile[OutputT],
+        model: Model | str,
+        *,
+        max_retries: int,
+        cache: Cache | None = None,
+    ) -> None:
         self._profile = profile
         self._model = model
+        self._max_retries = max_retries
+        self._cache = cache
+        self._model_id = None if cache is None else cache.model_id(model)
+        # Computed once: it builds the output model's JSON schema.
+        self._fingerprint = profile.fingerprint if self._model_id is not None else ""
         self._agent: Agent[None, OutputT] = Agent(
             output_type=profile.output_type,
             instructions=profile.instructions,
@@ -94,8 +110,28 @@ class Extractor[OutputT: BaseModel]:
             self._agent.output_validator(_adapt(validator))
 
     def extract(self, image: ImageSource) -> Extraction[OutputT]:
-        """Read one image. A failure after every retry is returned, not raised, with the usage
-        and retries it took, so failed images still count toward cost."""
+        """Read one image, or take it from the cache. A failure after every retry is returned,
+        not raised, with the usage and retries it took, so failed images still count toward
+        cost."""
+        key = self._cache_key(image)
+        cached = self._cached(key)
+        if cached is not None:
+            return cached
+        extraction = self._extract(image)
+        self._store(key, extraction)
+        return extraction
+
+    async def extract_async(self, image: ImageSource) -> Extraction[OutputT]:
+        """`extract` for callers that already run an event loop, such as pydantic-evals."""
+        key = self._cache_key(image)
+        cached = self._cached(key)
+        if cached is not None:
+            return cached
+        extraction = await self._extract_async(image)
+        self._store(key, extraction)
+        return extraction
+
+    def _extract(self, image: ImageSource) -> Extraction[OutputT]:
         started = time.perf_counter()
         usage = RunUsage()
         with capture_run_messages() as messages:
@@ -105,8 +141,7 @@ class Extractor[OutputT: BaseModel]:
                 return _extraction(None, str(exc), usage, messages, started)
         return _extraction(result.output, None, usage, messages, started)
 
-    async def extract_async(self, image: ImageSource) -> Extraction[OutputT]:
-        """`extract` for callers that already run an event loop, such as pydantic-evals."""
+    async def _extract_async(self, image: ImageSource) -> Extraction[OutputT]:
         started = time.perf_counter()
         usage = RunUsage()
         with capture_run_messages() as messages:
@@ -115,6 +150,71 @@ class Extractor[OutputT: BaseModel]:
             except UnexpectedModelBehavior as exc:
                 return _extraction(None, str(exc), usage, messages, started)
         return _extraction(result.output, None, usage, messages, started)
+
+    def _cache_key(self, image: ImageSource) -> str | None:
+        if self._model_id is None:
+            return None
+        return cache_key(image.sha256, self._model_id, self._fingerprint)
+
+    def _cached(self, key: str | None) -> Extraction[OutputT] | None:
+        if key is None or self._cache is None:
+            return None
+        entry = self._cache.read("extract", key, ExtractEntry)
+        # One that took more retries than allowed now would not have succeeded under this limit.
+        if entry is None or entry.retries > self._max_retries:
+            return None
+        # Anything the output model's own validators or serializers raise is a miss: the cache
+        # must never stop a run that would succeed without it.
+        try:
+            output = self._profile.output_type.model_validate_json(entry.input, by_name=True)
+            if json_sha256(output.model_dump(mode="json")) != entry.data_sha256:
+                return None
+        except Exception:
+            return None
+        return Extraction(
+            output=output,
+            error=None,
+            input_tokens=entry.input_tokens,
+            output_tokens=entry.output_tokens,
+            requests=entry.requests,
+            retries=entry.retries,
+            latency_ms=entry.latency_ms,
+            cached=True,
+        )
+
+    def _store(self, key: str | None, extraction: Extraction[OutputT]) -> None:
+        # Failures are not stored: the next run may succeed.
+        output = extraction.output
+        if key is None or self._cache is None or output is None:
+            return
+        # By field name, so a model that dumps by alias still validates back, and only the
+        # fields that were set, so they are the ones set again. Fields excluded from dumps and
+        # private attributes are not stored, so what observations leave out stays out of the
+        # cache too.
+        try:
+            text = output.model_dump_json(by_alias=False, round_trip=True, exclude_unset=True)
+            restored = self._profile.output_type.model_validate_json(text, by_name=True)
+        except Exception:  # e.g. a validator that reads an alias key; not stored, as above
+            return
+        # Only an output that comes back exactly as it was is stored, so a hit gives the same
+        # data, items and keys as the run that paid for it. One that does not (an excluded field
+        # or private attribute set, a validator that changes its input, NaN) is just not cached.
+        try:
+            is_same = same_state(restored, output)
+        except Exception:  # e.g. RecursionError on a private attribute that refers to itself
+            return
+        if not is_same:
+            return
+        entry = ExtractEntry(
+            input=text,
+            data_sha256=json_sha256(output.model_dump(mode="json")),
+            input_tokens=extraction.input_tokens,
+            output_tokens=extraction.output_tokens,
+            requests=extraction.requests,
+            retries=extraction.retries,
+            latency_ms=extraction.latency_ms,
+        )
+        self._cache.write("extract", key, entry)
 
     def observe(
         self, image: ImageSource, *, anonymize_paths: bool = False, screen: Screen | None = None
@@ -153,6 +253,7 @@ class Extractor[OutputT: BaseModel]:
             frame=None,
             crop=crop,
             screen=None,
+            cached=False,
             data=None,
             error=error,
             model=model_label(self._model),
@@ -206,6 +307,7 @@ class Extractor[OutputT: BaseModel]:
             ),
             crop=image.crop,
             screen=screen,
+            cached=extraction.cached,
             data=None if output is None else output.model_dump(mode="json"),
             error=extraction.error,
             model=model_label(self._model),

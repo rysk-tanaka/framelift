@@ -20,13 +20,21 @@ All notable changes to this project are documented here. This project follows
   choose the model for the check
 - `screen` in observations (the check's answer, model, usage and error) and `RunResult.skipped`;
   `framelift run` reports skipped images
+- A cache of extractions and screen checks, off unless asked for: `Pipeline(cache_dir=...)`,
+  `run_evaluation(cache_dir=...)`, `framelift run --cache DIR` and `framelift eval --cache DIR`;
+  keyed by the image sent, the model string and `Profile.fingerprint` (for a screen check, the
+  shrunk image, the model string, the description and `Profile.version`), for models given as
+  strings
+- `cached` in observations and screen checks, and `RunResult.cached`
 
 ### Changed
 
 - Breaking: `Profile.locate` is required; pass `locate="full"` to keep sending the whole screen
-- Breaking: observations are `framelift/observation/v3` (adds `crop` and `screen`, and the
-  `skipped` status)
+- Breaking: observations are `framelift/observation/v3` (adds `crop`, `screen` and `cached`, and
+  the `skipped` status)
 - A screen whose orientation has no crop box is recorded as an error observation and not sent
+- `Profile.fingerprint` gives other values than in 0.2: it now covers `locate` and `redact`, and
+  non-ASCII text is hashed in escaped form
 
 ## [0.2.0] - 2026-10-17
 
