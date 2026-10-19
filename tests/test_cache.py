@@ -21,6 +21,7 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 from pydantic_ai.models.function import AgentInfo, FunctionModel
+from pydantic_ai.models.openai import OpenAIChatModelSettings
 
 from examples.fantasy_shop import ShopItem, ShopScreen
 from examples.fantasy_shop import profile as fantasy_shop_profile
@@ -806,3 +807,104 @@ def test_a_lone_surrogate_in_the_instructions_does_not_stop_a_cached_run(
         assert [o.status for o in result.observations] == ["ok"]
 
     assert calls.count == 1
+
+
+def test_model_settings_are_sent_with_the_screen_check_and_the_extraction(
+    samples, tmp_path: Path
+) -> None:
+    root, truths = samples
+    profile = replace(shop_profile, screen_description="a shop's item list")
+    sent: dict[str, Any] = {}
+
+    def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        name = info.output_tools[0].name
+        sent[name] = info.model_settings
+        answer = {"is_target": True, "confidence": 0.9} if name == "screen_check" else ANSWER
+        return ModelResponse(parts=[ToolCallPart(name, answer)])
+
+    settings: OpenAIChatModelSettings = {"temperature": 0.0, "openai_reasoning_effort": "none"}
+    Pipeline(profile, model=FunctionModel(respond), model_settings=settings).run(
+        root / truths[0].file
+    )
+
+    assert sent == {"screen_check": settings, "final_result": settings}
+
+
+def test_model_settings_changed_after_construction_are_not_sent(
+    samples, tmp_path: Path, model_ids
+) -> None:
+    root, truths = samples
+    profile = replace(shop_profile, screen_description="a shop's item list")
+    sent: list[Any] = []
+
+    def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        name = info.output_tools[0].name
+        sent.append(info.model_settings)
+        answer = {"is_target": True, "confidence": 0.9} if name == "screen_check" else ANSWER
+        return ModelResponse(parts=[ToolCallPart(name, answer)])
+
+    settings: OpenAIChatModelSettings = {
+        "openai_reasoning_effort": "none",
+        "extra_body": {"top_k": 1},
+    }
+    pipeline = Pipeline(
+        profile, model=FunctionModel(respond), cache_dir=tmp_path, model_settings=settings
+    )
+    # The cache key was made of the settings as given, so what is changed afterwards, nested
+    # dicts included, must not be what is sent and stored under it.
+    settings["openai_reasoning_effort"] = "high"
+    settings["extra_body"]["top_k"] = 2
+    pipeline.run(root / truths[0].file)
+
+    assert sent == [{"openai_reasoning_effort": "none", "extra_body": {"top_k": 1}}] * 2
+
+
+def test_other_model_settings_are_asked_again(samples, tmp_path: Path, model_ids) -> None:
+    root, truths = samples
+    profile = replace(shop_profile, screen_description="a shop's item list")
+    asked: list[str] = []
+
+    def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        name = info.output_tools[0].name
+        asked.append(name)
+        answer = {"is_target": True, "confidence": 0.9} if name == "screen_check" else ANSWER
+        return ModelResponse(parts=[ToolCallPart(name, answer)])
+
+    runs: list[OpenAIChatModelSettings | None] = [
+        None,
+        # No settings, as before they could be given: the entries made without them are used.
+        {},
+        {"openai_reasoning_effort": "none"},
+        {"openai_reasoning_effort": "high"},
+        {"openai_reasoning_effort": "none"},
+    ]
+    counts = []
+    for settings in runs:
+        asked.clear()
+        Pipeline(
+            profile,
+            model=FunctionModel(respond),
+            cache_dir=tmp_path,
+            model_settings=settings,
+        ).run(root / truths[0].file)
+        counts.append(len(asked))
+
+    assert counts == [2, 0, 2, 2, 0]
+
+
+def test_model_settings_json_cannot_hold_are_not_cached(samples, tmp_path: Path, model_ids) -> None:
+    root, truths = samples
+    calls = Calls()
+    settings: Any = {"extra_headers": {"x": object()}}
+
+    with pytest.warns(UserWarning, match="model settings that JSON can hold") as caught:
+        for _ in range(2):
+            Pipeline(
+                shop_profile, model=calls.model, cache_dir=tmp_path, model_settings=settings
+            ).run(root / truths[0].file)
+
+    assert calls.count == 2
+    assert _entries(tmp_path) == []
+    # Once per cache, which each pipeline makes for itself.
+    assert len(caught) == 2
+    assert caught[0].filename == __file__

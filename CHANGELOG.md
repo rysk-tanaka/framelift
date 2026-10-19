@@ -5,6 +5,15 @@ All notable changes to this project are documented here. This project follows
 
 ## [Unreleased]
 
+### Added
+
+- `Pipeline(model_settings=...)` and `--model-setting KEY=VALUE` on `run` and `eval` send Pydantic
+  AI model settings with every request, the screen check's too, e.g.
+  `--model-setting openai_reasoning_effort=none` to keep a local model from thinking for minutes
+  over each screen check. VALUE is read as JSON, or else as a string. The settings are part of the
+  cache keys when there are any, so entries made without them are still used; settings that JSON
+  cannot hold are not cached
+
 ## [0.5.0] - 2026-10-18
 
 ### Changed

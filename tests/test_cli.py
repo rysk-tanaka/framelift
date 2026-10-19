@@ -778,3 +778,105 @@ def test_a_missing_api_key_is_reported_without_a_traceback(
 
     assert result.exit_code == 2, result.output
     assert "OPENAI_API_KEY" in result.output
+
+
+def test_run_passes_model_settings_on(samples, monkeypatch: pytest.MonkeyPatch) -> None:
+    root, _ = samples
+    passed: dict[str, object] = {}
+    pipeline = cli_module.Pipeline
+
+    def spy(profile, **kwargs: Any):
+        passed.update(kwargs)
+        return pipeline(profile, **kwargs)
+
+    monkeypatch.setattr(cli_module, "Pipeline", spy)
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            str(root),
+            "--profile",
+            "examples.fantasy_shop:profile",
+            "--model",
+            "test",
+            "--model-setting",
+            "openai_reasoning_effort=none",
+            "--model-setting",
+            "temperature=0",
+            "--model-setting",
+            'extra_body={"a": [1]}',
+            "--model-setting",
+            "stop=a=b",
+            "--model-setting",
+            "openai_user= NaN ",
+            "--out",
+            str(root / "out"),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    # A bare word stays a string, NaN too and without the spaces around it; JSON is read as
+    # JSON; only the first = splits.
+    assert passed["model_settings"] == {
+        "openai_reasoning_effort": "none",
+        "temperature": 0,
+        "extra_body": {"a": [1]},
+        "stop": "a=b",
+        "openai_user": "NaN",
+    }
+
+
+def test_eval_passes_model_settings_on(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from framelift._internal import evaluation
+
+    monkeypatch.chdir(Path(__file__).resolve().parents[1])
+    samples = tmp_path / "samples"
+    _synth(samples)
+    passed: dict[str, object] = {}
+    run_evaluation = evaluation.run_evaluation
+
+    def spy(*args: Any, **kwargs: Any):
+        passed.update(kwargs)
+        return run_evaluation(*args, **kwargs)
+
+    monkeypatch.setattr(evaluation, "run_evaluation", spy)
+
+    result = runner.invoke(
+        app,
+        [
+            "eval",
+            str(samples / "dataset.yaml"),
+            "--profile",
+            "examples.fantasy_shop:profile",
+            "--model",
+            "test",
+            "--model-setting",
+            "temperature=0.5",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert passed["model_settings"] == {"temperature": 0.5}
+
+
+@pytest.mark.parametrize("value", ["temperature", "=0", " =0"])
+def test_a_model_setting_without_a_key_is_a_usage_error(samples, value: str) -> None:
+    root, _ = samples
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            str(root),
+            "--profile",
+            "examples.fantasy_shop:profile",
+            "--model",
+            "test",
+            "--model-setting",
+            value,
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "Invalid value for --model-setting" in _plain(result.output)

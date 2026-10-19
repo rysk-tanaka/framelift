@@ -154,6 +154,24 @@ the observation's `screen`, apart from the extraction's `usage`. `screen_model` 
 on the command line) defaults to the extraction model. Evaluation does not check screens: its
 cases are all target screens.
 
+## Model settings
+
+Pydantic AI model settings are sent with every request, the screen check's too. A local model that
+thinks before answering, for one, can be told not to:
+
+```bash
+framelift run samples --profile examples.fantasy_shop:profile --model openai-chat:<model> \
+  --out out --model-setting openai_reasoning_effort=none
+```
+
+(`Pipeline(..., model_settings={"openai_reasoning_effort": "none"})` in Python, `framelift eval
+--model-setting` for evaluations.) `--model-setting KEY=VALUE` can be repeated; VALUE is read as
+JSON, or else as a string, so `temperature=0` is a number and `openai_reasoning_effort=none` a
+string; quote a string that would read as JSON (`openai_user='"12345"'`). Settings prefixed with
+another provider's name, such as `anthropic_`, are ignored, so a `screen_model` of another
+provider skips them. Settings without a prefix, such as `temperature` or `max_tokens`, go to the
+screen check and the extraction alike. Keys are not checked: a misspelled one is ignored too.
+
 ## Cache
 
 Pass a directory to cache extractions and screen checks in, and images read before are not paid
@@ -165,10 +183,11 @@ framelift run samples --profile examples.fantasy_shop:profile \
 ```
 
 (`Pipeline(..., cache_dir=".framelift-cache")` in Python, `framelift eval --cache` for
-evaluations.) An extraction is keyed by the image sent, the model string, the server's URL and the
-profile's `fingerprint`, and a screen check by the shrunk image checked, the model string, the
-server's URL, the screen description and `Profile.version`. So changing the crop, the model,
-the server, the instructions, the output model or `Profile.version` reads the image again, and
+evaluations.) An extraction is keyed by the image sent, the model string, the server's URL, the
+model settings when there are any and the profile's `fingerprint`, and a screen check by the
+shrunk image checked, the model string, the server's URL, the model settings, the screen
+description and `Profile.version`. So changing the crop, the model, the server, the model
+settings, the instructions, the output model or `Profile.version` reads the image again, and
 changing the description or the version checks it again. The URL is there because a model string
 does not name the server: `OPENAI_BASE_URL` points `openai-chat:<model>` at another one. Finding
 it needs the provider's API key, so a run needs the key even when every image is cached (except
@@ -177,6 +196,7 @@ does not reuse older entries. Validators are code and not part of the key: bump 
 when you change them, and keep them deterministic.
 Only successful results are cached, and only for models given as strings: a `Model` instance
 cannot be told apart from another with different settings, so it is not cached, and a warning says so.
+Neither are model settings that JSON cannot hold, such as an `httpx.Timeout`.
 An answer that needed more retries than the current `max_retries` is not reused.
 
 A cached observation has `"cached": true` and keeps the usage, retries and latency of the run

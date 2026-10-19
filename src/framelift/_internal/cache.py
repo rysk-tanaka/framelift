@@ -2,8 +2,9 @@
 images does not pay for them again.
 
 Entries live in ``cache_dir/<extract|screen>/<key[:2]>/<key>.json``. A key hashes `CACHE_REVISION`,
-the image sent, the model string, the server's URL and what else decides the answer (the
-profile's fingerprint, or the screen description and the profile's version). Only results that
+the image sent, the model string, the server's URL, the model settings when there are any and
+what else decides the answer (the profile's fingerprint, or the screen description and the
+profile's version). Only results that
 succeeded are stored.
 """
 
@@ -22,6 +23,7 @@ from pydantic import BaseModel, ValidationError
 
 if TYPE_CHECKING:
     from pydantic_ai.models import Model
+    from pydantic_ai.settings import ModelSettings
 
 type Kind = Literal["extract", "screen"]
 
@@ -124,14 +126,19 @@ class Cache:
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root)
         self._warned_model = False
+        self._warned_settings = False
         self._warned_write = False
 
-    def model_id(self, model: Model | str, resolved: Model) -> tuple[str, str] | None:
-        """`model_cache_id` and the URL of the server ``resolved`` (``model`` as a `Model`) asks,
-        as parts of a key, warning once when ``model`` cannot be cached.
+    def model_id(
+        self, model: Model | str, resolved: Model, settings: ModelSettings | None = None
+    ) -> tuple[str, ...] | None:
+        """`model_cache_id`, the URL of the server ``resolved`` (``model`` as a `Model`) asks and
+        the hash of ``settings``, as parts of a key, warning once when ``model`` or ``settings``
+        cannot be cached.
 
         The server is there because a model string does not name it: ``OPENAI_BASE_URL``, for
-        one, points the same string at another server.
+        one, points the same string at another server. No settings add no part, so that entries
+        made before settings could be given are still used.
         """
         model_id = model_cache_id(model)
         if model_id is None:
@@ -143,7 +150,20 @@ class Cache:
                     skip_file_prefixes=(_PACKAGE_DIR,),
                 )
             return None
-        return model_id, resolved.base_url or ""
+        parts = (model_id, resolved.base_url or "")
+        if not settings:
+            return parts
+        try:
+            return (*parts, json_sha256(settings))
+        except (TypeError, ValueError):  # e.g. an httpx.Timeout, which JSON cannot hold
+            if not self._warned_settings:
+                self._warned_settings = True
+                warnings.warn(
+                    "framelift caches results only for model settings that JSON can hold; with "
+                    "these, no extraction or screen check is cached, as they cannot be told apart",
+                    skip_file_prefixes=(_PACKAGE_DIR,),
+                )
+            return None
 
     def _path(self, kind: Kind, key: str) -> Path:
         return self.root / kind / key[:2] / f"{key}.json"
