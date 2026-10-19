@@ -14,7 +14,7 @@ from pydantic_ai.exceptions import UnexpectedModelBehavior
 from pydantic_ai.usage import RunUsage
 
 from framelift._internal.cache import ScreenEntry, cache_key
-from framelift._internal.extract import model_label, own_settings, resolve_model
+from framelift._internal.extract import is_local_server, model_label, own_settings, resolve_model
 from framelift._internal.layout import encode_png
 from framelift.observation import Screen, Usage
 
@@ -39,18 +39,17 @@ class ScreenCheck(BaseModel):
 
 
 def output_mode(model: Model) -> Literal["native", "tool"]:
-    """How ``model`` answers the check: as JSON text held to the schema when it can, or else
-    through a tool. Through a tool, a local model wrote up to a thousand characters explaining
-    its answer before the call, ten times the answer, even when told to write nothing else;
-    held to the schema, it has nowhere to write them.
+    """How ``model`` answers the check: as JSON text held to the schema on a local server
+    (`is_local_server`), or else through a tool, which every model takes.
 
-    A model without a profile of its own, such as a `FallbackModel`, whose models may differ,
-    answers through a tool, which every model takes."""
-    try:
-        profile = model.profile
-    except NotImplementedError:
-        return "tool"
-    return "native" if profile.get("supports_json_schema_output", False) else "tool"
+    Through a tool, a local model wrote up to a thousand characters explaining its answer before
+    the call, ten times the answer, even when told to write nothing else; held to the schema, it
+    has nowhere to write them. Elsewhere the check stays as it was: Pydantic AI's profiles cannot
+    tell whether a model takes a schema, as an OpenAI one claims it does for every model, and
+    one that does not would fail every check with an HTTP error. A local model whose profile
+    says it does not take one (``supports_json_schema_output``) answers through a tool too."""
+    is_native = is_local_server(model) and model.profile.get("supports_json_schema_output", False)
+    return "native" if is_native else "tool"
 
 
 def screen_image(view: Image.Image) -> bytes:
@@ -88,10 +87,10 @@ class ScreenClassifier:
         self._model_id = (
             None if cache is None else cache.model_id(model, self._model, model_settings)
         )
-        # A name of its own: with the default, the check and the extraction would both answer
-        # through "final_result", and a model given both could not tell them apart. A check
-        # through a tool is asked as before NativeOutput, so it adds nothing to the key and its
-        # entries are still used.
+        # A name of its own in both modes, "screen_check": through a tool the default would be
+        # "final_result", the extraction's, and a model given both could not tell them apart. A
+        # check through a tool is asked as before NativeOutput, so it adds nothing to the key and
+        # its entries are still used.
         output_type: NativeOutput[ScreenCheck] | ToolOutput[ScreenCheck]
         if output_mode(self._model) == "native":
             output_type = NativeOutput(ScreenCheck, name="screen_check")

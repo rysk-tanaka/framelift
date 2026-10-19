@@ -7,13 +7,13 @@ All notable changes to this project are documented here. This project follows
 
 ### Changed
 
-- The screen check answers in JSON held to its schema (Pydantic AI's `NativeOutput`) when the
-  model's profile supports it, and through a tool otherwise. Through a tool, a local model wrote up
-  to a thousand characters explaining its answer before the call; held to the schema, the answer
-  took 16 tokens instead of up to 332. A check held to the schema has a cache key of its own, so
-  screen checks cached by 0.6 for such models are asked again once; checks still asked through a
-  tool and extractions are still used. A model without a profile of its own, such as a
-  `FallbackModel`, is asked through a tool
+- The screen check answers in JSON held to its schema (Pydantic AI's `NativeOutput`) on a local
+  OpenAI-compatible server, such as LM Studio's, and through a tool as before elsewhere. Through a
+  tool, a local model wrote up to a thousand characters explaining its answer before the call;
+  held to the schema, the answer took 16 tokens instead of up to 332. Other providers are not
+  asked this way, as their profiles cannot tell which models take a schema. A check held to the
+  schema has a cache key of its own, so screen checks cached by 0.6 on local servers are asked
+  again once; other checks and extractions are still used
 
 ## [0.6.0] - 2026-10-19
 

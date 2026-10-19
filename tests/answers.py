@@ -1,5 +1,5 @@
 """Responses for tests' `FunctionModel`s in the shape each output is asked for: the screen check
-answers in JSON text when the model can be held to a schema, as a `FunctionModel` can, and the
+answers in JSON text when the model is held to a schema, as one on a local server is, and the
 extraction through a tool."""
 
 from __future__ import annotations

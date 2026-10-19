@@ -8,6 +8,7 @@ import pytest
 from pydantic_ai import models
 from pydantic_ai.messages import ModelResponse
 from pydantic_ai.models.function import FunctionModel
+from pydantic_ai.profiles import ModelProfile
 
 from framelift._internal import synth
 
@@ -49,8 +50,9 @@ class AnsweringModel(FunctionModel):
         answered: str | None = "gemma-3",
         system: str = "openai",
         base_url: str | None = LOCAL_SERVER,
+        profile: ModelProfile | None = None,
     ) -> None:
-        super().__init__(function, model_name=model_name)
+        super().__init__(function, model_name=model_name, profile=profile)
         self._answering_system = system
         self._base_url = base_url
         self._answered = answered

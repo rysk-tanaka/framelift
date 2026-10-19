@@ -35,7 +35,7 @@ from framelift._internal.sources import load_image
 from tests.answers import output_name, respond_with
 
 if TYPE_CHECKING:
-    from pydantic_ai.profiles import ModelProfile
+    from collections.abc import Callable
 
 shop_profile = replace(fantasy_shop_profile, locate="full")
 ANSWER = {"shop_name": "A", "items": [{"name": "a", "price": 1}]}
@@ -583,9 +583,9 @@ def test_each_video_frame_is_cached_under_the_image_sent(
     assert len(_entries(tmp_path)) == calls
 
 
-def _screen_answers(*checks: dict[str, Any], model_profile: ModelProfile | None = None):
-    """A model that answers the screen check with ``checks`` in turn, and the extraction with
-    `ANSWER`; it counts the checks asked."""
+def _screen_answers(*checks: dict[str, Any], build: Callable[[Any], FunctionModel] = FunctionModel):
+    """A model, made by ``build``, that answers the screen check with ``checks`` in turn, and the
+    extraction with `ANSWER`; it counts the checks asked."""
     asked = {"screen_check": 0}
 
     def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
@@ -596,7 +596,7 @@ def _screen_answers(*checks: dict[str, Any], model_profile: ModelProfile | None 
         asked["screen_check"] += 1
         return respond_with(info, json.dumps(answer))
 
-    return FunctionModel(respond, profile=model_profile), asked
+    return build(respond), asked
 
 
 def test_failed_screen_checks_are_not_cached(samples, tmp_path: Path, model_ids) -> None:
@@ -746,15 +746,22 @@ def test_a_new_profile_version_checks_every_screen_again(
 
 
 def test_a_check_asked_through_a_tool_is_not_answered_from_one_held_to_a_schema(
-    samples, tmp_path: Path, model_ids
+    samples, tmp_path: Path, model_ids, answering_model
 ) -> None:
     root, truths = samples
     path = root / truths[0].file
     profile = replace(shop_profile, screen_description="a shop")
-    native, _ = _screen_answers({"is_target": False, "confidence": 0.6})
+    # The same local server, so that only the mode tells the keys apart.
+    native, _ = _screen_answers(
+        {"is_target": False, "confidence": 0.6},
+        build=lambda respond: answering_model(respond, answered=None),
+    )
     Pipeline(profile, model=native, cache_dir=tmp_path).run(path)
     tool, asked = _screen_answers(
-        {"is_target": True, "confidence": 0.9}, model_profile={"supports_json_schema_output": False}
+        {"is_target": True, "confidence": 0.9},
+        build=lambda respond: answering_model(
+            respond, answered=None, profile={"supports_json_schema_output": False}
+        ),
     )
 
     result = Pipeline(profile, model=tool, cache_dir=tmp_path).run(path)
@@ -769,9 +776,7 @@ def test_a_check_asked_through_a_tool_keeps_the_key_it_had_before_native_output(
     root, truths = samples
     path = root / truths[0].file
     profile = replace(shop_profile, screen_description="a shop")
-    tool, asked = _screen_answers(
-        {"is_target": True, "confidence": 0.9}, model_profile={"supports_json_schema_output": False}
-    )
+    tool, asked = _screen_answers({"is_target": True, "confidence": 0.9})
     # An entry as 0.6 wrote it, keyed without the output mode.
     data = screen_image(load_image(path, Layout.full()).view)
     key = cache_key(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 from pathlib import Path
+from typing import Any
 
 import pytest
 from PIL import Image
@@ -14,8 +15,9 @@ from pydantic_ai.messages import (
 from pydantic_ai.models.fallback import FallbackModel
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
+from framelift._internal.extract import resolve_model
 from framelift._internal.layout import Layout
-from framelift._internal.screen import ScreenClassifier, screen_image
+from framelift._internal.screen import ScreenClassifier, output_mode, screen_image
 from framelift._internal.sources import load_image
 from tests.answers import output_name, respond_with
 
@@ -80,7 +82,7 @@ def test_a_check_that_never_validates_is_a_failure_with_its_usage(tmp_path: Path
     assert screen.usage.requests == 2  # the first try and one retry
 
 
-def test_the_check_is_held_to_a_schema_when_the_model_can_be(tmp_path: Path) -> None:
+def test_the_check_is_held_to_a_schema_on_a_local_server(tmp_path: Path, answering_model) -> None:
     seen: list[tuple[str, int]] = []
 
     def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
@@ -88,7 +90,8 @@ def test_the_check_is_held_to_a_schema_when_the_model_can_be(tmp_path: Path) -> 
         return respond_with(info, {"is_target": False, "confidence": 0.7})
 
     source = load_image(_image(tmp_path / "a.png", (100, 200)), Layout.full())
-    classifier = ScreenClassifier("a shop", FunctionModel(respond), max_retries=0, version="1")
+    model = answering_model(respond, answered=None)
+    classifier = ScreenClassifier("a shop", model, max_retries=0, version="1")
 
     screen = classifier.classify(source)
 
@@ -97,8 +100,17 @@ def test_the_check_is_held_to_a_schema_when_the_model_can_be(tmp_path: Path) -> 
     assert screen.is_target is False
 
 
-def test_the_check_is_asked_through_a_tool_when_the_model_cannot_be_held_to_a_schema(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        # OpenAI's profile claims a schema for every model, older ones too.
+        {"base_url": "https://api.openai.com/v1"},
+        {"system": "anthropic", "base_url": "https://api.anthropic.com"},
+        {"profile": {"supports_json_schema_output": False}},
+    ],
+)
+def test_the_check_is_asked_through_a_tool_elsewhere_or_without_a_schema(
+    tmp_path: Path, answering_model, kwargs: dict[str, Any]
 ) -> None:
     seen: list[list[str]] = []
 
@@ -107,7 +119,7 @@ def test_the_check_is_asked_through_a_tool_when_the_model_cannot_be_held_to_a_sc
         return respond_with(info, {"is_target": True, "confidence": 0.8})
 
     source = load_image(_image(tmp_path / "a.png", (100, 200)), Layout.full())
-    model = FunctionModel(respond, profile={"supports_json_schema_output": False})
+    model = answering_model(respond, answered=None, **kwargs)
     classifier = ScreenClassifier("a shop", model, max_retries=0, version="1")
 
     screen = classifier.classify(source)
@@ -132,3 +144,17 @@ def test_a_model_without_a_profile_of_its_own_is_asked_through_a_tool(tmp_path: 
 
     assert seen == [["screen_check"]]
     assert screen.is_target is True
+
+
+@pytest.mark.parametrize(
+    ("base_url", "mode"),
+    [("http://localhost:1234/v1", "native"), ("https://api.openai.com/v1", "tool")],
+)
+def test_a_model_string_is_held_to_a_schema_only_on_a_local_server(
+    monkeypatch: pytest.MonkeyPatch, base_url: str, mode: str
+) -> None:
+    monkeypatch.setenv("OPENAI_BASE_URL", base_url)
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+
+    # As a run resolves it: on a local server, wrapped to check the model's name.
+    assert output_mode(resolve_model("openai:qwen3")) == mode

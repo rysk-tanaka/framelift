@@ -53,7 +53,7 @@ Pipeline.run(inputs)
     Layout: EXIF の向きと色空間を正規化し、redact を黒く塗ってから locate の範囲で切り出す。向きに合う範囲がなければ NoCropError（error の観測にして次へ進む）
     full かつ redact なしの静止画だけは、元のバイト列をそのまま送る
   → Profile.screen_description があれば ScreenClassifier.classify: 送る画像（ImageSource.view）を長辺 512px に縮小した PNG で対象画面か判定する
-      モデルが JSON スキーマに沿った出力に対応していれば（プロファイルの supports_json_schema_output）NativeOutput、でなければ ToolOutput で答えさせる（output_mode）。どちらも名前は screen_check（抽出の final_result と見分けるため）。モデルは screen_model（省略時は model）
+      ローカルのサーバー（is_local_server）では NativeOutput、ほかでは ToolOutput で答えさせる（output_mode）。Pydantic AI のプロファイルの supports_json_schema_output は OpenAI のどのモデルでも True で、対応しているかの目印にならないため。ローカルのサーバーでもプロファイルが False なら ToolOutput。どちらも名前は screen_check（抽出の final_result と見分けるため）。モデルは screen_model（省略時は model）
       model_settings（CLI は --model-setting KEY=VALUE。VALUE は JSON、読めなければ文字列）は判定と抽出の Agent の両方に渡す
       対象外なら status: "skipped"、判定の失敗なら status: "error" の観測にして抽出しない。判定の結果と usage は観測の screen に残す
   → Extractor.observe: Pydantic AI の Agent に output_type と画像（BinaryContent）を渡し、Observation（v3。source・frame・crop・screen・cached）を作る

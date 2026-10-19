@@ -28,10 +28,11 @@ if TYPE_CHECKING:
 type Kind = Literal["extract", "screen"]
 
 CACHE_REVISION = "1"
-"""Part of every key. Bump it whenever framelift changes what it asks or how it reads the answer:
-the prompts, the screen check's instructions or output, or the entry format; entries made the old
-way are then not used. A change that only some results go through can instead add a part to
-their keys, so that the other entries are still used, as the screen check's output does."""
+"""Part of every key. Bump it whenever framelift changes what it asks or how it reads the answer
+for every result: the prompts, the screen check's instructions or the shape of its output, or the
+entry format; entries made the old way are then not used. A change that only some models go
+through can instead add a part to their keys, so that the other entries are still used, as
+asking local servers' screen checks through NativeOutput does."""
 
 # Warnings point at the first frame outside framelift: the user's call, however deep inside.
 _PACKAGE_DIR = str(Path(__file__).parent.parent) + os.sep
