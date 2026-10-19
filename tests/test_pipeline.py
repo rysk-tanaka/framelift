@@ -35,6 +35,7 @@ from framelift._internal import video as video_module
 from framelift._internal.extract import resolve_model
 from framelift._internal.screen import screen_image
 from framelift.observation import FrameRef
+from tests.answers import output_name, respond_with
 
 # Most tests look up the answer by the hash of the input image, so the screen is sent whole.
 shop_profile = replace(fantasy_shop_profile, locate="full")
@@ -569,15 +570,15 @@ def _decoded(content: BinaryContent) -> Image.Image:
 def _screen_router(
     is_target, screens: list[BinaryContent], extractions: list[BinaryContent]
 ) -> FunctionModel:
-    """One model for both requests, told apart by the name of their output tool."""
+    """One model for both requests, told apart by the name of their output."""
 
     def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         content = _content(messages)
-        if info.output_tools[0].name == "screen_check":
+        if output_name(info) == "screen_check":
             screens.append(content)
             answer = {"is_target": is_target(_decoded(content)), "confidence": 0.9}
-            return ModelResponse(parts=[ToolCallPart("screen_check", answer)])
-        assert info.output_tools[0].name == "final_result"
+            return respond_with(info, answer)
+        assert output_name(info) == "final_result"
         extractions.append(content)
         return _fixed_answer(messages, info)
 
@@ -626,9 +627,9 @@ def test_a_failed_screen_check_is_an_error_and_nothing_is_extracted(samples) -> 
     extractions: list[BinaryContent] = []
 
     def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-        if info.output_tools[0].name == "screen_check":
+        if output_name(info) == "screen_check":
             answer = {"is_target": True, "confidence": 2.0}  # out of range every time
-            return ModelResponse(parts=[ToolCallPart("screen_check", answer)])
+            return respond_with(info, answer)
         extractions.append(_content(messages))
         return _fixed_answer(messages, info)
 
@@ -652,9 +653,8 @@ def test_the_screen_check_can_use_its_own_model(samples) -> None:
     asked: list[str] = []
 
     def screen(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-        asked.append(f"screen:{info.output_tools[0].name}")
-        answer = {"is_target": True, "confidence": 1.0}
-        return ModelResponse(parts=[ToolCallPart("screen_check", answer)])
+        asked.append(f"screen:{output_name(info)}")
+        return respond_with(info, {"is_target": True, "confidence": 1.0})
 
     def extract(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         asked.append(f"extract:{info.output_tools[0].name}")
@@ -813,9 +813,8 @@ def test_another_model_answering_the_screen_check_stops_the_run(samples, answeri
     asked: list[str] = []
 
     def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-        asked.append(info.output_tools[0].name)
-        answer = {"is_target": True, "confidence": 0.9}
-        return ModelResponse(parts=[ToolCallPart("screen_check", answer)])
+        asked.append(output_name(info))
+        return respond_with(info, {"is_target": True, "confidence": 0.9})
 
     model = answering_model(respond, model_name="qwen3")
 

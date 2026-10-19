@@ -5,11 +5,11 @@ from __future__ import annotations
 
 import hashlib
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from PIL import Image
 from pydantic import BaseModel, Field
-from pydantic_ai import Agent, AgentRetries, BinaryContent, ToolOutput
+from pydantic_ai import Agent, AgentRetries, BinaryContent, NativeOutput, ToolOutput
 from pydantic_ai.exceptions import UnexpectedModelBehavior
 from pydantic_ai.usage import RunUsage
 
@@ -36,6 +36,14 @@ class ScreenCheck(BaseModel):
 
     is_target: bool = Field(description="Whether the image shows the described screen")
     confidence: float = Field(ge=0, le=1, description="How sure the answer is, from 0 to 1")
+
+
+def output_mode(model: Model) -> Literal["native", "tool"]:
+    """How ``model`` answers the check: as JSON text held to the schema when it can, or else
+    through a tool. Through a tool, a local model wrote up to a thousand characters explaining
+    its answer before the call, ten times the answer, even when told to write nothing else;
+    held to the schema, it has nowhere to write them."""
+    return "native" if model.profile.get("supports_json_schema_output", False) else "tool"
 
 
 def screen_image(view: Image.Image) -> bytes:
@@ -73,10 +81,16 @@ class ScreenClassifier:
         self._model_id = (
             None if cache is None else cache.model_id(model, self._model, model_settings)
         )
+        self._output_mode = output_mode(self._model)
+        # A name of its own: with the default, the check and the extraction would both answer
+        # through "final_result", and a model given both could not tell them apart.
+        output_type = (
+            NativeOutput(ScreenCheck, name="screen_check")
+            if self._output_mode == "native"
+            else ToolOutput(ScreenCheck, name="screen_check")
+        )
         self._agent: Agent[None, ScreenCheck] = Agent(
-            # A name of its own: with the default, the check and the extraction would both
-            # answer through "final_result", and a model given both could not tell them apart.
-            output_type=ToolOutput(ScreenCheck, name="screen_check"),
+            output_type=output_type,
             instructions=f"Decide whether the image shows this screen: {description}",
             retries=AgentRetries(output=max_retries),
             name="framelift:screen",
@@ -91,8 +105,8 @@ class ScreenClassifier:
         # its EXIF rotation and color mode there, which a PNG could not hold as they are.
         data = screen_image(image.view)
         # The image checked, not the one extracted: they differ once shrunk. The description,
-        # not the rest of the profile, decides the answer; the version is there so that bumping
-        # it checks every image again, as it reads every image again.
+        # not the rest of the profile, decides the answer, with how it is asked for; the version
+        # is there so that bumping it checks every image again, as it reads every image again.
         key = (
             None
             if self._model_id is None
@@ -100,6 +114,7 @@ class ScreenClassifier:
                 hashlib.sha256(data).hexdigest(),
                 *self._model_id,
                 self._description,
+                self._output_mode,
                 self._version,
             )
         )

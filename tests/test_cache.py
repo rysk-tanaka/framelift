@@ -8,7 +8,7 @@ import math
 import warnings
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
@@ -31,6 +31,10 @@ from framelift._internal.cache import Cache, ExtractEntry, cache_key, same_state
 from framelift._internal.extract import Extractor, check_model_name, is_local_server
 from framelift._internal.layout import Layout
 from framelift._internal.sources import load_image
+from tests.answers import output_name, respond_with
+
+if TYPE_CHECKING:
+    from pydantic_ai.profiles import ModelProfile
 
 shop_profile = replace(fantasy_shop_profile, locate="full")
 ANSWER = {"shop_name": "A", "items": [{"name": "a", "price": 1}]}
@@ -386,10 +390,10 @@ def test_screen_checks_are_cached(samples, tmp_path: Path, model_ids) -> None:
     asked: list[str] = []
 
     def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-        name = info.output_tools[0].name
+        name = output_name(info)
         asked.append(name)
         answer = {"is_target": True, "confidence": 0.9} if name == "screen_check" else ANSWER
-        return ModelResponse(parts=[ToolCallPart(name, answer)])
+        return respond_with(info, answer)
 
     Pipeline(profile, model=FunctionModel(respond), cache_dir=tmp_path).run(root)
     first = list(asked)
@@ -408,10 +412,10 @@ def test_another_screen_description_is_checked_again(samples, tmp_path: Path, mo
     asked: list[str] = []
 
     def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-        name = info.output_tools[0].name
+        name = output_name(info)
         asked.append(name)
         answer = {"is_target": True, "confidence": 0.9} if name == "screen_check" else ANSWER
-        return ModelResponse(parts=[ToolCallPart(name, answer)])
+        return respond_with(info, answer)
 
     for description in ("a shop", "a shop's item list"):
         profile = replace(shop_profile, screen_description=description)
@@ -429,10 +433,10 @@ def test_another_server_is_asked_again(samples, tmp_path: Path, model_ids, answe
     asked: list[str] = []
 
     def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-        name = info.output_tools[0].name
+        name = output_name(info)
         asked.append(name)
         answer = {"is_target": True, "confidence": 0.9} if name == "screen_check" else ANSWER
-        return ModelResponse(parts=[ToolCallPart(name, answer)])
+        return respond_with(info, answer)
 
     # The same model id, as the same model string would give, on two servers.
     for url in (
@@ -578,20 +582,20 @@ def test_each_video_frame_is_cached_under_the_image_sent(
     assert len(_entries(tmp_path)) == calls
 
 
-def _screen_answers(*checks: dict[str, Any]):
+def _screen_answers(*checks: dict[str, Any], model_profile: dict[str, Any] | None = None):
     """A model that answers the screen check with ``checks`` in turn, and the extraction with
     `ANSWER`; it counts the checks asked."""
     asked = {"screen_check": 0}
 
     def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-        name = info.output_tools[0].name
+        name = output_name(info)
         if name != "screen_check":
-            return ModelResponse(parts=[ToolCallPart(name, json.dumps(ANSWER))])
+            return respond_with(info, json.dumps(ANSWER))
         answer = checks[min(asked["screen_check"], len(checks) - 1)]
         asked["screen_check"] += 1
-        return ModelResponse(parts=[ToolCallPart(name, json.dumps(answer))])
+        return respond_with(info, json.dumps(answer))
 
-    return FunctionModel(respond), asked
+    return FunctionModel(respond, profile=cast("ModelProfile | None", model_profile)), asked
 
 
 def test_failed_screen_checks_are_not_cached(samples, tmp_path: Path, model_ids) -> None:
@@ -740,6 +744,24 @@ def test_a_new_profile_version_checks_every_screen_again(
     assert asked["screen_check"] == 1
 
 
+def test_a_check_asked_through_a_tool_is_not_answered_from_one_held_to_a_schema(
+    samples, tmp_path: Path, model_ids
+) -> None:
+    root, truths = samples
+    path = root / truths[0].file
+    profile = replace(shop_profile, screen_description="a shop")
+    native, _ = _screen_answers({"is_target": False, "confidence": 0.6})
+    Pipeline(profile, model=native, cache_dir=tmp_path).run(path)
+    tool, asked = _screen_answers(
+        {"is_target": True, "confidence": 0.9}, model_profile={"supports_json_schema_output": False}
+    )
+
+    result = Pipeline(profile, model=tool, cache_dir=tmp_path).run(path)
+
+    assert [o.status for o in result.observations] == ["ok"]
+    assert asked["screen_check"] == 1
+
+
 def test_an_interrupted_write_leaves_no_temporary_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -817,10 +839,10 @@ def test_model_settings_are_sent_with_the_screen_check_and_the_extraction(
     sent: dict[str, Any] = {}
 
     def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-        name = info.output_tools[0].name
+        name = output_name(info)
         sent[name] = info.model_settings
         answer = {"is_target": True, "confidence": 0.9} if name == "screen_check" else ANSWER
-        return ModelResponse(parts=[ToolCallPart(name, answer)])
+        return respond_with(info, answer)
 
     settings: OpenAIChatModelSettings = {"temperature": 0.0, "openai_reasoning_effort": "none"}
     Pipeline(profile, model=FunctionModel(respond), model_settings=settings).run(
@@ -838,10 +860,10 @@ def test_model_settings_changed_after_construction_are_not_sent(
     sent: list[Any] = []
 
     def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-        name = info.output_tools[0].name
+        name = output_name(info)
         sent.append(info.model_settings)
         answer = {"is_target": True, "confidence": 0.9} if name == "screen_check" else ANSWER
-        return ModelResponse(parts=[ToolCallPart(name, answer)])
+        return respond_with(info, answer)
 
     settings: OpenAIChatModelSettings = {
         "openai_reasoning_effort": "none",
@@ -865,10 +887,10 @@ def test_other_model_settings_are_asked_again(samples, tmp_path: Path, model_ids
     asked: list[str] = []
 
     def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-        name = info.output_tools[0].name
+        name = output_name(info)
         asked.append(name)
         answer = {"is_target": True, "confidence": 0.9} if name == "screen_check" else ANSWER
-        return ModelResponse(parts=[ToolCallPart(name, answer)])
+        return respond_with(info, answer)
 
     runs: list[OpenAIChatModelSettings | None] = [
         None,

@@ -5,6 +5,14 @@ All notable changes to this project are documented here. This project follows
 
 ## [Unreleased]
 
+### Changed
+
+- The screen check answers in JSON held to its schema (Pydantic AI's `NativeOutput`) when the
+  model's profile supports it, and through a tool otherwise. Through a tool, a local model wrote up
+  to a thousand characters explaining its answer before the call; held to the schema, the answer
+  took 16 tokens instead of up to 332. Which way the check is asked is part of its cache key, so
+  screen checks cached by 0.6 are asked again once; extractions are still used
+
 ## [0.6.0] - 2026-10-19
 
 ### Added
