@@ -843,15 +843,20 @@ def test_model_settings_changed_after_construction_are_not_sent(
         answer = {"is_target": True, "confidence": 0.9} if name == "screen_check" else ANSWER
         return ModelResponse(parts=[ToolCallPart(name, answer)])
 
-    settings: OpenAIChatModelSettings = {"openai_reasoning_effort": "none"}
+    settings: OpenAIChatModelSettings = {
+        "openai_reasoning_effort": "none",
+        "extra_body": {"top_k": 1},
+    }
     pipeline = Pipeline(
         profile, model=FunctionModel(respond), cache_dir=tmp_path, model_settings=settings
     )
-    # The cache key was made of "none", so "high" must not be what is sent and stored under it.
+    # The cache key was made of the settings as given, so what is changed afterwards, nested
+    # dicts included, must not be what is sent and stored under it.
     settings["openai_reasoning_effort"] = "high"
+    settings["extra_body"]["top_k"] = 2
     pipeline.run(root / truths[0].file)
 
-    assert sent == [{"openai_reasoning_effort": "none"}] * 2
+    assert sent == [{"openai_reasoning_effort": "none", "extra_body": {"top_k": 1}}] * 2
 
 
 def test_other_model_settings_are_asked_again(samples, tmp_path: Path, model_ids) -> None:

@@ -808,18 +808,22 @@ def test_run_passes_model_settings_on(samples, monkeypatch: pytest.MonkeyPatch) 
             'extra_body={"a": [1]}',
             "--model-setting",
             "stop=a=b",
+            "--model-setting",
+            "openai_user= NaN ",
             "--out",
             str(root / "out"),
         ],
     )
 
     assert result.exit_code == 0, result.output
-    # A bare word stays a string; JSON is read as JSON; only the first = splits.
+    # A bare word stays a string, NaN too and without the spaces around it; JSON is read as
+    # JSON; only the first = splits.
     assert passed["model_settings"] == {
         "openai_reasoning_effort": "none",
         "temperature": 0,
         "extra_body": {"a": [1]},
         "stop": "a=b",
+        "openai_user": "NaN",
     }
 
 

@@ -146,6 +146,12 @@ ModelSetting = Annotated[
 ]
 
 
+def _not_json(word: str) -> Any:
+    """Refuse NaN and Infinity, which json.loads takes although JSON has no such values, so that
+    they stay strings as the help says."""
+    raise ValueError(word)
+
+
 def _model_settings(values: list[str] | None) -> ModelSettings | None:
     """``--model-setting`` as Pydantic AI model settings, or None when none were given."""
     if not values:
@@ -157,8 +163,9 @@ def _model_settings(values: list[str] | None) -> ModelSettings | None:
             raise typer.BadParameter(
                 f"expected KEY=VALUE, got {value!r}", param_hint="--model-setting"
             )
+        text = text.strip()
         try:
-            settings[key.strip()] = json.loads(text)
+            settings[key.strip()] = json.loads(text, parse_constant=_not_json)
         except ValueError:
             # Bare words such as none are what most settings take; quoting them for JSON in a
             # shell would be a chore.

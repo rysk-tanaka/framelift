@@ -14,7 +14,7 @@ from pydantic_ai.exceptions import UnexpectedModelBehavior
 from pydantic_ai.usage import RunUsage
 
 from framelift._internal.cache import ScreenEntry, cache_key
-from framelift._internal.extract import model_label, resolve_model
+from framelift._internal.extract import model_label, own_settings, resolve_model
 from framelift._internal.layout import encode_png
 from framelift.observation import Screen, Usage
 
@@ -69,8 +69,7 @@ class ScreenClassifier:
         self._model = resolve_model(model)
         self._max_retries = max_retries
         self._cache = cache
-        # A copy, so a change to the caller's dict cannot send settings the key was not made of.
-        model_settings = None if model_settings is None else model_settings.copy()
+        model_settings = own_settings(model_settings)
         self._model_id = (
             None if cache is None else cache.model_id(model, self._model, model_settings)
         )

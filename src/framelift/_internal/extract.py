@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import ipaddress
 import socket
 import time
@@ -167,6 +168,12 @@ class _NameChecked(WrapperModel):
         check_model_name(self.wrapped, stream.get())
 
 
+def own_settings(settings: ModelSettings | None) -> ModelSettings | None:
+    """A deep copy of ``settings``, so that a later change to the caller's dict, nested ones such
+    as ``extra_body`` included, cannot send settings the cache key was not made of."""
+    return None if settings is None else copy.deepcopy(settings)
+
+
 def resolve_model(model: Model | str) -> Model:
     """``model`` as a `Model`, checking the names answered when it is a local server (see
     `is_local_server`), whose answers from another model would otherwise be recorded and cached
@@ -229,8 +236,7 @@ class Extractor[OutputT: BaseModel]:
         self._model = resolve_model(model)
         self._max_retries = max_retries
         self._cache = cache
-        # A copy, so a change to the caller's dict cannot send settings the key was not made of.
-        model_settings = None if model_settings is None else model_settings.copy()
+        model_settings = own_settings(model_settings)
         self._model_id = (
             None if cache is None else cache.model_id(model, self._model, model_settings)
         )
