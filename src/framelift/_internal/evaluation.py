@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from pydantic_ai.models import Model
+    from pydantic_ai.settings import ModelSettings
     from pydantic_evals.reporting import EvaluationReport
 
     from framelift._internal.items import ItemKey
@@ -382,14 +383,18 @@ def run_evaluation(
     max_retries: int = 2,
     progress: bool = True,
     cache_dir: str | Path | None = None,
+    model_settings: ModelSettings | None = None,
 ) -> EvaluationReport[CaseInputs, Output, Metadata]:
     """Extract every case of a dataset from `build_dataset` and score the results.
 
     With ``cache_dir``, extractions are cached as in `Pipeline`; a case read from the cache keeps
     the usage, retries and latency of the run that paid for it, so models still compare fairly.
+    ``model_settings`` are sent with every request, as in `Pipeline`.
     """
     cache = Cache(cache_dir) if cache_dir is not None else None
-    extractor = Extractor(profile, model, max_retries=max_retries, cache=cache)
+    extractor = Extractor(
+        profile, model, max_retries=max_retries, cache=cache, model_settings=model_settings
+    )
     # The same image a run would send, so scores reflect what is cropped and redacted.
     layout = Layout.from_profile(profile)
     # Another model answering is a setting, not a case: every case would be read by it. Once one

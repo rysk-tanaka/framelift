@@ -20,6 +20,7 @@ from framelift.observation import Screen, Usage
 
 if TYPE_CHECKING:
     from pydantic_ai.models import Model
+    from pydantic_ai.settings import ModelSettings
 
     from framelift._internal.cache import Cache
     from framelift._internal.sources import ImageSource
@@ -59,6 +60,7 @@ class ScreenClassifier:
         max_retries: int,
         version: str,
         cache: Cache | None = None,
+        model_settings: ModelSettings | None = None,
     ) -> None:
         self._description = description
         self._version = version
@@ -67,7 +69,9 @@ class ScreenClassifier:
         self._model = resolve_model(model)
         self._max_retries = max_retries
         self._cache = cache
-        self._model_id = None if cache is None else cache.model_id(model, self._model)
+        self._model_id = (
+            None if cache is None else cache.model_id(model, self._model, model_settings)
+        )
         self._agent: Agent[None, ScreenCheck] = Agent(
             # A name of its own: with the default, the check and the extraction would both
             # answer through "final_result", and a model given both could not tell them apart.
@@ -75,6 +79,7 @@ class ScreenClassifier:
             instructions=f"Decide whether the image shows this screen: {description}",
             retries=AgentRetries(output=max_retries),
             name="framelift:screen",
+            model_settings=model_settings,
         )
 
     def classify(self, image: ImageSource) -> Screen:

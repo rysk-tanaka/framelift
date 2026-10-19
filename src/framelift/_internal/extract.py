@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 
     from pydantic_ai.messages import ModelMessage, ModelResponse
     from pydantic_ai.models import Model, StreamedResponse
+    from pydantic_ai.settings import ModelSettings
 
     from framelift._internal.cache import Cache
     from framelift._internal.sources import ImageSource
@@ -220,6 +221,7 @@ class Extractor[OutputT: BaseModel]:
         *,
         max_retries: int,
         cache: Cache | None = None,
+        model_settings: ModelSettings | None = None,
     ) -> None:
         self._profile = profile
         self._label = model_label(model)
@@ -227,7 +229,9 @@ class Extractor[OutputT: BaseModel]:
         self._model = resolve_model(model)
         self._max_retries = max_retries
         self._cache = cache
-        self._model_id = None if cache is None else cache.model_id(model, self._model)
+        self._model_id = (
+            None if cache is None else cache.model_id(model, self._model, model_settings)
+        )
         # Computed once: it builds the output model's JSON schema.
         self._fingerprint = profile.fingerprint if self._model_id is not None else ""
         self._agent: Agent[None, OutputT] = Agent(
@@ -235,6 +239,7 @@ class Extractor[OutputT: BaseModel]:
             instructions=profile.instructions,
             retries=AgentRetries(output=max_retries),
             name=f"framelift:{profile.name}",
+            model_settings=model_settings,
         )
         for validator in profile.validators:
             self._agent.output_validator(_adapt(validator))

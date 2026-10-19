@@ -105,7 +105,7 @@ graph LR
 
 - 判定には、切り出し・塗りつぶし後の画像を長辺 512px 以下に縮小した PNG を送る。判定に細部は要らず、トークンを抑えられるため。切り出す前の画面全体を送ると、切り出しで外した領域まで外部に送ることになるので、図の順のとおり、切り出しの後に判定する
 - 元のバイト列をそのまま送る静止画でも、判定には EXIF の向きと色空間を正規化した画像を使う。元の JPEG のままでは、横倒しの画像が判定に送られ、CMYK の画像は PNG に保存できないため
-- 判定のモデルは `Pipeline(screen_model=...)`（CLI は `run --screen-model`）で分けられ、省略すると抽出と同じモデルを使う。判定の出力ツールには `screen_check` という名前を付け、抽出（既定の `final_result`）と見分けられるようにする
+- 判定のモデルは `Pipeline(screen_model=...)`（CLI は `run --screen-model`）で分けられ、省略すると抽出と同じモデルを使う。モデルの設定（`Pipeline(model_settings=...)`、CLI は `--model-setting`）は判定にも送る。考えてから答えるローカルのモデルでは、判定 1 回に数分かかることがあり、判定こそ考える処理を切りたいため。判定の出力ツールには `screen_check` という名前を付け、抽出（既定の `final_result`）と見分けられるようにする
 - 対象でないと判定した画像は `status: "skipped"` の観測にする。`skipped` は失敗ではないので、終了コードは変えない。集約は `ok` の観測だけを使うので、票にもならない
 - 再試行しても判定の応答が検証を通らなかった画像は、推測で抽出せず `status: "error"` にする
 - 判定のトークンは抽出の `usage` と分けて、観測の `screen.usage` に残す。判定に失敗した場合も残すので、判定にかかったコストが見える
@@ -149,10 +149,11 @@ Pydantic AI の `Agent` に、`output_type` と切り出した画像（`BinaryCo
 
 `Pipeline(cache_dir=...)`（CLI は `run --cache DIR`・`eval --cache DIR`）を指定したときだけ、抽出と画面判定の結果をそのディレクトリにキャッシュし、再実行や評価の繰り返しで同じ画像に課金しない。読み取った内容を、利用者の知らない場所に残さないため、既定では無効にする。
 
-- 抽出のキーは「送る画像の sha256・モデルの文字列・接続先の URL・`Profile.fingerprint`」、画面判定のキーは「判定に送る縮小画像の sha256・モデルの文字列・接続先の URL・`screen_description`・`Profile.version`」。切り出し範囲を変えると送る画像が変わるので、キーも変わる。判定のキーに `Profile.version` を入れるのは、版を上げれば判定もやり直せるようにするため。説明文を変えずに、誤った判定をやり直す手段がほかにない
+- 抽出のキーは「送る画像の sha256・モデルの文字列・接続先の URL・モデルの設定・`Profile.fingerprint`」、画面判定のキーは「判定に送る縮小画像の sha256・モデルの文字列・接続先の URL・モデルの設定・`screen_description`・`Profile.version`」。切り出し範囲を変えると送る画像が変わるので、キーも変わる。判定のキーに `Profile.version` を入れるのは、版を上げれば判定もやり直せるようにするため。説明文を変えずに、誤った判定をやり直す手段がほかにない
 - どちらのキーにも `CACHE_REVISION` を入れる。framelift 自身のプロンプト・判定の指示文と出力・エントリの形式を変えたらこれを上げ、古い版で作ったエントリを使わない
 - モデルの文字列（`"anthropic:<model>"` など）にはプロバイダと API の種類が含まれるが、接続先は含まれない。`OPENAI_BASE_URL` で LM Studio などの OpenAI 互換サーバーを指すと、同じ文字列で別のサーバーに問い合わせられる。そのため、モデルを構築時に解決し、その `base_url` もキーに入れる。URL はハッシュしてから入るので、URL に認証情報があってもキャッシュには出ない。認証を環境変数で変えた違いはキーに入らない
 - 多くのプロバイダは、モデルを解決するときに API キーを求める。そのため、全部の画像がキャッシュにある実行でも API キーが要る。`OPENAI_BASE_URL` を設定した `openai` のプロバイダは、API キーがなくても解決できるので要らない
+- モデルの設定は、考える処理の有無などで答えを変えるので、JSON にしたハッシュをキーに入れる。設定がないときは何も足さず、設定を渡せるようになる前のエントリをそのまま使う。JSON にできない設定（`httpx.Timeout` など）はキャッシュせず、警告を 1 回出す
 - `Model` のインスタンスで渡したモデルはキャッシュせず、警告を 1 回出す。設定・プロファイル・内側のモデル・HTTP クライアントなど、答えを変える構成を外から確実に見分けられないため。CLI の `--model` は常に文字列なので、CLI では常に使える
 - 検証を通った抽出と、成功した判定だけを書く。失敗は次の実行で成功しうるので書かない
 - `max_retries` はキーに入れず、エントリに元の再試行回数を残す。今の `max_retries` より多く再試行して通ったエントリは使わない。上限を下げた評価で、上限を超えて通った結果を成功に数えないため
@@ -305,9 +306,9 @@ Typer で実装する。
 
 | コマンド | 用途 | 版 |
 | --- | --- | --- |
-| `framelift run <inputs...> --profile pkg.module:obj --model ... --out DIR [--screen-model ...] [--cache DIR]` | 抽出（`--screen-model` と `--cache` は 0.3） | 0.0.1 |
+| `framelift run <inputs...> --profile pkg.module:obj --model ... --out DIR [--screen-model ...] [--model-setting KEY=VALUE] [--cache DIR]` | 抽出（`--screen-model` と `--cache` は 0.3、`--model-setting` は 0.6） | 0.0.1 |
 | `framelift synth --out DIR --n 100 [--videos N] [--scale] [--noise] [--jpeg-quality]` | 合成サンプルの生成（`--videos` は 0.2、`--scale`・`--noise`・`--jpeg-quality` は 0.4） | 0.0.1 |
-| `framelift eval <dataset.yaml> --profile ... --model ... [--root DIR] [--cache DIR]` | 評価（`--cache` は 0.3） | 0.1 |
+| `framelift eval <dataset.yaml> --profile ... --model ... [--root DIR] [--model-setting KEY=VALUE] [--cache DIR]` | 評価（`--cache` は 0.3、`--model-setting` は 0.6） | 0.1 |
 | `framelift frames <video or image> --out DIR [--profile ...] [--frame-rate] [--motion-threshold]` | モデルに送る画像と `frames.jsonl` だけを書き出して確認する（デバッグ用）。`--profile` で切り出しと塗りつぶしを適用する（`--profile` と静止画は 0.3） | 0.2 |
 
 ### パッケージングとリリース

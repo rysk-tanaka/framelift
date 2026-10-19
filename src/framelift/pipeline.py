@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     from typing import TextIO
 
     from pydantic_ai.models import Model
+    from pydantic_ai.settings import ModelSettings
 
     from framelift._internal.sources import ImageSource
     from framelift.item import Item
@@ -117,6 +118,9 @@ class Pipeline[OutputT: BaseModel]:
         model: A Pydantic AI model or a ``"provider:model"`` string.
         screen_model: The model for the screen check, when the profile has a
             ``screen_description``; ``None`` uses ``model``.
+        model_settings: Pydantic AI model settings for every request, the screen check's too,
+            e.g. ``{"openai_reasoning_effort": "none"}`` to turn off a local model's thinking.
+            Settings for another provider are ignored, so one model can be given its own.
         out_dir: Where to write ``observations.jsonl`` (and ``items.jsonl`` when the profile has
             an ``item_key``). ``None`` keeps results in memory only.
         max_retries: How many times a failed validation may ask the model to try again, for the
@@ -144,6 +148,7 @@ class Pipeline[OutputT: BaseModel]:
         *,
         model: Model | str,
         screen_model: Model | str | None = None,
+        model_settings: ModelSettings | None = None,
         out_dir: str | Path | None = None,
         max_retries: int = 2,
         anonymize_paths: bool = False,
@@ -166,7 +171,10 @@ class Pipeline[OutputT: BaseModel]:
         cache = Cache(self.cache_dir) if self.cache_dir is not None else None
         self.screen_model: Model | str | None = None
         """The model the screen check uses; None when the profile has no screen_description."""
-        self._extractor = Extractor(profile, model, max_retries=max_retries, cache=cache)
+        self.model_settings = model_settings
+        self._extractor = Extractor(
+            profile, model, max_retries=max_retries, cache=cache, model_settings=model_settings
+        )
         self._classifier = None
         if profile.screen_description is not None:
             self.screen_model = model if screen_model is None else screen_model
@@ -176,6 +184,7 @@ class Pipeline[OutputT: BaseModel]:
                 max_retries=max_retries,
                 cache=cache,
                 version=profile.version,
+                model_settings=model_settings,
             )
         self._layout = Layout.from_profile(profile)
 

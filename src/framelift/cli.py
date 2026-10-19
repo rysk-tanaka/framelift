@@ -12,7 +12,7 @@ import tempfile
 import traceback
 import warnings
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any, cast
 
 import imagehash
 import typer
@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
     from PIL import Image
+    from pydantic_ai.settings import ModelSettings
 
 app = typer.Typer(
     help="Extract structured data from screen recordings and screenshots with vision LLMs.",
@@ -133,6 +134,38 @@ MotionThreshold = Annotated[
     ),
 ]
 
+ModelSetting = Annotated[
+    list[str] | None,
+    typer.Option(
+        "--model-setting",
+        metavar="KEY=VALUE",
+        help="Pydantic AI model setting for every request, the screen check's too; repeatable. "
+        "VALUE is read as JSON, or else as a string, e.g. openai_reasoning_effort=none or "
+        "temperature=0",
+    ),
+]
+
+
+def _model_settings(values: list[str] | None) -> ModelSettings | None:
+    """``--model-setting`` as Pydantic AI model settings, or None when none were given."""
+    if not values:
+        return None
+    settings: dict[str, Any] = {}
+    for value in values:
+        key, sep, text = value.partition("=")
+        if not sep or not key.strip():
+            raise typer.BadParameter(
+                f"expected KEY=VALUE, got {value!r}", param_hint="--model-setting"
+            )
+        try:
+            settings[key.strip()] = json.loads(text)
+        except ValueError:
+            # Bare words such as none are what most settings take; quoting them for JSON in a
+            # shell would be a chore.
+            settings[key.strip()] = text
+    # Keys are not checked: ModelSettings and each provider's settings take different ones.
+    return cast("ModelSettings", settings)
+
 
 @app.command()
 def run(
@@ -149,6 +182,7 @@ def run(
             "screen_description [default: --model]"
         ),
     ] = None,
+    model_setting: ModelSetting = None,
     max_retries: Annotated[
         int,
         typer.Option(
@@ -171,11 +205,13 @@ def run(
 ) -> None:
     """Extract data from images and videos; write observations.jsonl and items.jsonl."""
     loaded = load_profile(profile)
+    settings = _model_settings(model_setting)
     try:
         pipeline = Pipeline(
             loaded,
             model=model,
             screen_model=screen_model,
+            model_settings=settings,
             out_dir=out,
             max_retries=max_retries,
             anonymize_paths=anonymize_paths,
@@ -235,6 +271,7 @@ def evaluate(
             "[default: the dataset's directory]"
         ),
     ] = None,
+    model_setting: ModelSetting = None,
     max_retries: Annotated[int, typer.Option(min=0, help="Retries when validation fails")] = 2,
     cache: Annotated[
         Path | None,
@@ -255,13 +292,19 @@ def evaluate(
         raise typer.Exit(code=2) from exc
 
     loaded = load_profile(profile)
+    settings = _model_settings(model_setting)
     try:
         cases = evaluation.build_dataset(dataset, loaded, root)
     except (OSError, ValueError) as exc:
         raise typer.BadParameter(str(exc), param_hint="DATASET") from exc
     try:
         report = evaluation.run_evaluation(
-            cases, loaded, model, max_retries=max_retries, cache_dir=cache
+            cases,
+            loaded,
+            model,
+            max_retries=max_retries,
+            cache_dir=cache,
+            model_settings=settings,
         )
     # Any UserError, not only ModelMismatchError: the model is resolved in there too, which fails
     # e.g. when the provider's API key is not set.
