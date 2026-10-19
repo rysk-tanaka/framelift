@@ -53,7 +53,7 @@ Pipeline.run(inputs)
     Layout: EXIF の向きと色空間を正規化し、redact を黒く塗ってから locate の範囲で切り出す。向きに合う範囲がなければ NoCropError（error の観測にして次へ進む）
     full かつ redact なしの静止画だけは、元のバイト列をそのまま送る
   → Profile.screen_description があれば ScreenClassifier.classify: 送る画像（ImageSource.view）を長辺 512px に縮小した PNG で対象画面か判定する
-      出力ツール名は screen_check（抽出の final_result と見分けるため）。モデルは screen_model（省略時は model）
+      ローカルのサーバー（is_local_server）では NativeOutput、ほかでは ToolOutput で答えさせる（output_mode）。Pydantic AI のプロファイルの supports_json_schema_output は OpenAI のどのモデルでも True で、対応しているかの目印にならないため。ローカルのサーバーでもプロファイルが False なら ToolOutput。どちらも名前は screen_check（抽出の final_result と見分けるため）。モデルは screen_model（省略時は model）
       model_settings（CLI は --model-setting KEY=VALUE。VALUE は JSON、読めなければ文字列）は判定と抽出の Agent の両方に渡す
       対象外なら status: "skipped"、判定の失敗なら status: "error" の観測にして抽出しない。判定の結果と usage は観測の screen に残す
   → Extractor.observe: Pydantic AI の Agent に output_type と画像（BinaryContent）を渡し、Observation（v3。source・frame・crop・screen・cached）を作る
@@ -62,7 +62,7 @@ Pipeline.run(inputs)
       モデルは Extractor・ScreenClassifier の構築時に infer_model で 1 度だけ解決し、その Model で問い合わせる
       ローカルのサーバー（system が openai で、ホストが localhost・プライベートや Tailscale のアドレス・ドットのない名前・.local などのローカルの名前。is_local_server）では、resolve_model がモデルを _NameChecked で包み、応答ごとに model_name が指定で始まるか（大文字・小文字は区別しない）を確かめる。始まらなければ再試行の前に ModelMismatchError（UserError）で実行を止める（判定も同じ）。CLI は、構築時の UserError（API キーがないなど）と実行中の ModelMismatchError を終了コード 2 のメッセージにする（eval は実行中の UserError もすべて）
       読めない画像・動画（途中で壊れた動画、フレームのない動画を含む）は status: "error"、frame: null の観測にして次へ進む
-      cache_dir があれば、抽出と判定の結果をキャッシュ（_internal/cache.py）から読み、成功した結果を書く。キーは CACHE_REVISION・送る画像の sha256・モデルの文字列・接続先の URL（解決した Model の base_url）・モデルの設定（あるときだけ）・fingerprint（判定は縮小画像の sha256・モデルの文字列・接続先の URL・モデルの設定・screen_description・version）。JSON にできない設定はキャッシュしない（警告 1 回）。framelift のプロンプトや判定の出力を変えたら CACHE_REVISION を上げる
+      cache_dir があれば、抽出と判定の結果をキャッシュ（_internal/cache.py）から読み、成功した結果を書く。キーは CACHE_REVISION・送る画像の sha256・モデルの文字列・接続先の URL（解決した Model の base_url）・モデルの設定（あるときだけ）・fingerprint（判定は縮小画像の sha256・モデルの文字列・接続先の URL・モデルの設定・screen_description・version・NativeOutput のときだけ native）。JSON にできない設定はキャッシュしない（警告 1 回）。framelift のプロンプトや判定の出力を変えたら CACHE_REVISION を上げる。一部の結果だけが変わるなら、代わりにその結果のキーに項目を足し、ほかのエントリを使い続ける（判定の出力の形はこちら）
       Model のインスタンスはキャッシュしない（警告 1 回）。復元したモデルが元と厳密に同じ状態（same_state）のときだけ書く。ヒットした観測は cached: true で、usage は元の実行のもの
   → out_dir があれば observations.jsonl に 1 行ずつ追記
   → item_key があれば Aggregator で項目をキーごとに束ねて多数決し、items.jsonl に書く
@@ -135,7 +135,7 @@ framelift eval（framelift[eval] が必要）
 
 - `live` マーカーのテスト（`tests/test_live.py`）以外は実モデルを呼ばない。`tests/conftest.py` で `models.ALLOW_MODEL_REQUESTS = False` にしていて、live テストだけがテストの中で `True` に戻す
 - ローカルのサーバーの接続先や応答のモデル名が要るテストは、`tests/conftest.py` の `answering_model` フィクスチャ（`AnsweringModel`）でモデルを作る
-- モデルの応答は `FunctionModel` で組み立てる。出力はツール呼び出しなので、`ToolCallPart(info.output_tools[0].name, {...})` で返す
+- モデルの応答は `FunctionModel` で組み立てる。抽出の出力はツール呼び出しなので、`ToolCallPart(info.output_tools[0].name, {...})` で返す。画面判定は、ローカルのサーバーとして作ったモデル（`answering_model`）では JSON のテキスト、ほかではツール呼び出しで答えるので、判定にも答えるモデルは `tests/answers.py` の `output_name`・`respond_with` を使う
 - 再試行の確認は、1 回目に検証を通らない値、2 回目に正しい値を返す `FunctionModel` で行う
 - CLI のテストは `--model test`（Pydantic AI 組み込みのテスト用モデル）と `typer.testing.CliRunner` を使う。モデルの文字列の解決を確かめるテストだけは `openai:<name>` などを渡し、`extract.infer_model` を差し替えるか、`OPENAI_*` の環境変数を `monkeypatch` で決める
 - 画像は `samples` フィクスチャ（`synth.generate`）、動画は `scrolling_video` フィクスチャ（`synth.generate_video`）で作る。テスト用の画像・動画ファイルを置かない

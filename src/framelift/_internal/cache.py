@@ -3,9 +3,9 @@ images does not pay for them again.
 
 Entries live in ``cache_dir/<extract|screen>/<key[:2]>/<key>.json``. A key hashes `CACHE_REVISION`,
 the image sent, the model string, the server's URL, the model settings when there are any and
-what else decides the answer (the profile's fingerprint, or the screen description and the
-profile's version). Only results that
-succeeded are stored.
+what else decides the answer (the profile's fingerprint, or the screen description, the profile's
+version and, when the check is held to a schema, that it is). Only results that succeeded are
+stored.
 """
 
 from __future__ import annotations
@@ -28,9 +28,11 @@ if TYPE_CHECKING:
 type Kind = Literal["extract", "screen"]
 
 CACHE_REVISION = "1"
-"""Part of every key. Bump it whenever framelift changes what it asks or how it reads the answer:
-the prompts, the screen check's instructions or output, or the entry format; entries made the old
-way are then not used."""
+"""Part of every key. Bump it whenever framelift changes what it asks or how it reads the answer
+for every result: the prompts, the screen check's instructions or the shape of its output, or the
+entry format; entries made the old way are then not used. A change that only some models go
+through can instead add a part to their keys, so that the other entries are still used, as
+asking local servers' screen checks through NativeOutput does."""
 
 # Warnings point at the first frame outside framelift: the user's call, however deep inside.
 _PACKAGE_DIR = str(Path(__file__).parent.parent) + os.sep
