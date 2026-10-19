@@ -88,14 +88,17 @@ class ScreenClassifier:
         self._model_id = (
             None if cache is None else cache.model_id(model, self._model, model_settings)
         )
-        self._output_mode = output_mode(self._model)
         # A name of its own: with the default, the check and the extraction would both answer
-        # through "final_result", and a model given both could not tell them apart.
-        output_type = (
-            NativeOutput(ScreenCheck, name="screen_check")
-            if self._output_mode == "native"
-            else ToolOutput(ScreenCheck, name="screen_check")
-        )
+        # through "final_result", and a model given both could not tell them apart. A check
+        # through a tool is asked as before NativeOutput, so it adds nothing to the key and its
+        # entries are still used.
+        output_type: NativeOutput[ScreenCheck] | ToolOutput[ScreenCheck]
+        if output_mode(self._model) == "native":
+            output_type = NativeOutput(ScreenCheck, name="screen_check")
+            self._mode_part: tuple[str, ...] = ("native",)
+        else:
+            output_type = ToolOutput(ScreenCheck, name="screen_check")
+            self._mode_part = ()
         self._agent: Agent[None, ScreenCheck] = Agent(
             output_type=output_type,
             instructions=f"Decide whether the image shows this screen: {description}",
@@ -114,8 +117,6 @@ class ScreenClassifier:
         # The image checked, not the one extracted: they differ once shrunk. The description,
         # not the rest of the profile, decides the answer, with how it is asked for; the version
         # is there so that bumping it checks every image again, as it reads every image again.
-        # A check through a tool is asked as before NativeOutput, so it adds nothing and its
-        # entries are still used.
         key = (
             None
             if self._model_id is None
@@ -124,7 +125,7 @@ class ScreenClassifier:
                 *self._model_id,
                 self._description,
                 self._version,
-                *(("native",) if self._output_mode == "native" else ()),
+                *self._mode_part,
             )
         )
         cached = self._cached(key)

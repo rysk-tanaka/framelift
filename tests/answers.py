@@ -16,7 +16,12 @@ if TYPE_CHECKING:
 def output_name(info: AgentInfo) -> str:
     """The name of the output asked for: "screen_check" or "final_result"."""
     output = info.model_request_parameters.output_object
-    return info.output_tools[0].name if output is None else output.name or ""
+    if output is None:
+        return info.output_tools[0].name
+    # A check asked without its name would otherwise be answered as an extraction, and fail
+    # as a model's mistake would, not as the missing name it is.
+    assert output.name, "the output held to a schema has no name"
+    return output.name
 
 
 def respond_with(info: AgentInfo, data: dict[str, Any] | str) -> ModelResponse:
