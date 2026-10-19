@@ -144,6 +144,7 @@ framelift eval（framelift[eval] が必要）
 ### ドキュメント
 
 - README は英語（OSS として読まれる範囲を広げるため）。CLAUDE.md は日本語
+- README は概要・インストール・Quick start に留め、機能ごとの詳しい説明は `docs/guide/`（英語）に書く。README から docs へのリンクと画像は、PyPI でも表示されるよう `https://github.com/...` や `https://raw.githubusercontent.com/...` の絶対 URL にする
 - Markdown の箇条書きの前にコロンを使わない（「以下の項目:」→「以下の項目。」）。太字は使わない
 
 ## コミット規約
