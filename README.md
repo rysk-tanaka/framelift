@@ -37,7 +37,7 @@ flowchart LR
     obs -- "item_key" --> items["items.jsonl"]
 ```
 
-## Features (0.6)
+## Features (0.7)
 
 - Image and video input (files, directories, glob patterns), each tagged with its SHA-256
 - Videos are read once per still screen: frames are sampled, scrolling frames are skipped, and the
@@ -48,7 +48,8 @@ flowchart LR
   such as turning off a local model's thinking
 - Only the part of the screen you choose is sent: crop each orientation to a box and paint over
   areas such as a chat window before anything leaves your machine
-- An optional screen check: images of other screens are skipped before extraction
+- An optional screen check: images of other screens are skipped before extraction, answered in a
+  few tokens on a local server
 - An optional cache, so a run or an evaluation repeated on the same images is not paid for again
 - `observations.jsonl` output with source, frame, crop, usage and retry information per image or
   frame
