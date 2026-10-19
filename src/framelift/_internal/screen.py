@@ -42,8 +42,15 @@ def output_mode(model: Model) -> Literal["native", "tool"]:
     """How ``model`` answers the check: as JSON text held to the schema when it can, or else
     through a tool. Through a tool, a local model wrote up to a thousand characters explaining
     its answer before the call, ten times the answer, even when told to write nothing else;
-    held to the schema, it has nowhere to write them."""
-    return "native" if model.profile.get("supports_json_schema_output", False) else "tool"
+    held to the schema, it has nowhere to write them.
+
+    A model without a profile of its own, such as a `FallbackModel`, whose models may differ,
+    answers through a tool, which every model takes."""
+    try:
+        profile = model.profile
+    except NotImplementedError:
+        return "tool"
+    return "native" if profile.get("supports_json_schema_output", False) else "tool"
 
 
 def screen_image(view: Image.Image) -> bytes:
@@ -107,6 +114,8 @@ class ScreenClassifier:
         # The image checked, not the one extracted: they differ once shrunk. The description,
         # not the rest of the profile, decides the answer, with how it is asked for; the version
         # is there so that bumping it checks every image again, as it reads every image again.
+        # A check through a tool is asked as before NativeOutput, so it adds nothing and its
+        # entries are still used.
         key = (
             None
             if self._model_id is None
@@ -114,8 +123,8 @@ class ScreenClassifier:
                 hashlib.sha256(data).hexdigest(),
                 *self._model_id,
                 self._description,
-                self._output_mode,
                 self._version,
+                *(("native",) if self._output_mode == "native" else ()),
             )
         )
         cached = self._cached(key)

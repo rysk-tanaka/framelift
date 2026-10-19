@@ -8,7 +8,7 @@ import math
 import warnings
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
@@ -27,9 +27,10 @@ from examples.fantasy_shop import ShopItem, ShopScreen
 from examples.fantasy_shop import profile as fantasy_shop_profile
 from framelift import Pipeline, Profile
 from framelift._internal import cache as cache_module
-from framelift._internal.cache import Cache, ExtractEntry, cache_key, same_state
+from framelift._internal.cache import Cache, ExtractEntry, ScreenEntry, cache_key, same_state
 from framelift._internal.extract import Extractor, check_model_name, is_local_server
 from framelift._internal.layout import Layout
+from framelift._internal.screen import screen_image
 from framelift._internal.sources import load_image
 from tests.answers import output_name, respond_with
 
@@ -582,7 +583,7 @@ def test_each_video_frame_is_cached_under_the_image_sent(
     assert len(_entries(tmp_path)) == calls
 
 
-def _screen_answers(*checks: dict[str, Any], model_profile: dict[str, Any] | None = None):
+def _screen_answers(*checks: dict[str, Any], model_profile: ModelProfile | None = None):
     """A model that answers the screen check with ``checks`` in turn, and the extraction with
     `ANSWER`; it counts the checks asked."""
     asked = {"screen_check": 0}
@@ -595,7 +596,7 @@ def _screen_answers(*checks: dict[str, Any], model_profile: dict[str, Any] | Non
         asked["screen_check"] += 1
         return respond_with(info, json.dumps(answer))
 
-    return FunctionModel(respond, profile=cast("ModelProfile | None", model_profile)), asked
+    return FunctionModel(respond, profile=model_profile), asked
 
 
 def test_failed_screen_checks_are_not_cached(samples, tmp_path: Path, model_ids) -> None:
@@ -760,6 +761,31 @@ def test_a_check_asked_through_a_tool_is_not_answered_from_one_held_to_a_schema(
 
     assert [o.status for o in result.observations] == ["ok"]
     assert asked["screen_check"] == 1
+
+
+def test_a_check_asked_through_a_tool_keeps_the_key_it_had_before_native_output(
+    samples, tmp_path: Path, model_ids
+) -> None:
+    root, truths = samples
+    path = root / truths[0].file
+    profile = replace(shop_profile, screen_description="a shop")
+    tool, asked = _screen_answers(
+        {"is_target": True, "confidence": 0.9}, model_profile={"supports_json_schema_output": False}
+    )
+    # An entry as 0.6 wrote it, keyed without the output mode.
+    data = screen_image(load_image(path, Layout.full()).view)
+    key = cache_key(
+        hashlib.sha256(data).hexdigest(), "function-model", "", "a shop", profile.version
+    )
+    entry = ScreenEntry(
+        is_target=False, confidence=0.6, input_tokens=1, output_tokens=1, requests=1, latency_ms=1
+    )
+    Cache(tmp_path).write("screen", key, entry)
+
+    result = Pipeline(profile, model=tool, cache_dir=tmp_path).run(path)
+
+    assert [o.status for o in result.observations] == ["skipped"]
+    assert asked["screen_check"] == 0
 
 
 def test_an_interrupted_write_leaves_no_temporary_file(

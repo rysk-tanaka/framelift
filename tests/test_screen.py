@@ -9,9 +9,9 @@ from pydantic_ai.messages import (
     BinaryContent,
     ModelMessage,
     ModelResponse,
-    ToolCallPart,
     UserPromptPart,
 )
+from pydantic_ai.models.fallback import FallbackModel
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from framelift._internal.layout import Layout
@@ -104,12 +104,28 @@ def test_the_check_is_asked_through_a_tool_when_the_model_cannot_be_held_to_a_sc
 
     def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         seen.append([t.name for t in info.output_tools])
-        return ModelResponse(
-            parts=[ToolCallPart("screen_check", {"is_target": True, "confidence": 0.8})]
-        )
+        return respond_with(info, {"is_target": True, "confidence": 0.8})
 
     source = load_image(_image(tmp_path / "a.png", (100, 200)), Layout.full())
     model = FunctionModel(respond, profile={"supports_json_schema_output": False})
+    classifier = ScreenClassifier("a shop", model, max_retries=0, version="1")
+
+    screen = classifier.classify(source)
+
+    assert seen == [["screen_check"]]
+    assert screen.is_target is True
+
+
+def test_a_model_without_a_profile_of_its_own_is_asked_through_a_tool(tmp_path: Path) -> None:
+    seen: list[list[str]] = []
+
+    def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        seen.append([t.name for t in info.output_tools])
+        return respond_with(info, {"is_target": True, "confidence": 0.8})
+
+    source = load_image(_image(tmp_path / "a.png", (100, 200)), Layout.full())
+    # Its models may differ in what they take, so it has no profile to read the mode from.
+    model = FallbackModel(FunctionModel(respond), FunctionModel(respond))
     classifier = ScreenClassifier("a shop", model, max_retries=0, version="1")
 
     screen = classifier.classify(source)

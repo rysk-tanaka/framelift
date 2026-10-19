@@ -62,7 +62,7 @@ Pipeline.run(inputs)
       モデルは Extractor・ScreenClassifier の構築時に infer_model で 1 度だけ解決し、その Model で問い合わせる
       ローカルのサーバー（system が openai で、ホストが localhost・プライベートや Tailscale のアドレス・ドットのない名前・.local などのローカルの名前。is_local_server）では、resolve_model がモデルを _NameChecked で包み、応答ごとに model_name が指定で始まるか（大文字・小文字は区別しない）を確かめる。始まらなければ再試行の前に ModelMismatchError（UserError）で実行を止める（判定も同じ）。CLI は、構築時の UserError（API キーがないなど）と実行中の ModelMismatchError を終了コード 2 のメッセージにする（eval は実行中の UserError もすべて）
       読めない画像・動画（途中で壊れた動画、フレームのない動画を含む）は status: "error"、frame: null の観測にして次へ進む
-      cache_dir があれば、抽出と判定の結果をキャッシュ（_internal/cache.py）から読み、成功した結果を書く。キーは CACHE_REVISION・送る画像の sha256・モデルの文字列・接続先の URL（解決した Model の base_url）・モデルの設定（あるときだけ）・fingerprint（判定は縮小画像の sha256・モデルの文字列・接続先の URL・モデルの設定・screen_description・出力の形（native か tool）・version）。JSON にできない設定はキャッシュしない（警告 1 回）。framelift のプロンプトや判定の出力を変えたら CACHE_REVISION を上げる
+      cache_dir があれば、抽出と判定の結果をキャッシュ（_internal/cache.py）から読み、成功した結果を書く。キーは CACHE_REVISION・送る画像の sha256・モデルの文字列・接続先の URL（解決した Model の base_url）・モデルの設定（あるときだけ）・fingerprint（判定は縮小画像の sha256・モデルの文字列・接続先の URL・モデルの設定・screen_description・version・NativeOutput のときだけ native）。JSON にできない設定はキャッシュしない（警告 1 回）。framelift のプロンプトや判定の出力を変えたら CACHE_REVISION を上げる。一部の結果だけが変わるなら、代わりにその結果のキーに項目を足し、ほかのエントリを使い続ける（判定の出力の形はこちら）
       Model のインスタンスはキャッシュしない（警告 1 回）。復元したモデルが元と厳密に同じ状態（same_state）のときだけ書く。ヒットした観測は cached: true で、usage は元の実行のもの
   → out_dir があれば observations.jsonl に 1 行ずつ追記
   → item_key があれば Aggregator で項目をキーごとに束ねて多数決し、items.jsonl に書く
