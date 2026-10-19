@@ -1,5 +1,13 @@
 # framelift
 
+[![PyPI](https://img.shields.io/pypi/v/framelift)](https://pypi.org/project/framelift/)
+[![Python](https://img.shields.io/pypi/pyversions/framelift)](https://pypi.org/project/framelift/)
+[![CI](https://img.shields.io/github/actions/workflow/status/rysk-tanaka/framelift/ci.yml?branch=main&label=CI)](https://github.com/rysk-tanaka/framelift/actions/workflows/ci.yml)
+[![License](https://img.shields.io/pypi/l/framelift)](https://github.com/rysk-tanaka/framelift/blob/main/LICENSE)
+[![uv](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json)](https://github.com/astral-sh/uv)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+[![ty](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ty/main/assets/badge/v0.json)](https://github.com/astral-sh/ty)
+
 Extract structured data from screen recordings and screenshots with vision LLMs.
 
 You describe **what** to read as a Pydantic model and **how** to read it as a `Profile`;
