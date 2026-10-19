@@ -830,6 +830,30 @@ def test_model_settings_are_sent_with_the_screen_check_and_the_extraction(
     assert sent == {"screen_check": settings, "final_result": settings}
 
 
+def test_model_settings_changed_after_construction_are_not_sent(
+    samples, tmp_path: Path, model_ids
+) -> None:
+    root, truths = samples
+    profile = replace(shop_profile, screen_description="a shop's item list")
+    sent: list[Any] = []
+
+    def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        name = info.output_tools[0].name
+        sent.append(info.model_settings)
+        answer = {"is_target": True, "confidence": 0.9} if name == "screen_check" else ANSWER
+        return ModelResponse(parts=[ToolCallPart(name, answer)])
+
+    settings: OpenAIChatModelSettings = {"openai_reasoning_effort": "none"}
+    pipeline = Pipeline(
+        profile, model=FunctionModel(respond), cache_dir=tmp_path, model_settings=settings
+    )
+    # The cache key was made of "none", so "high" must not be what is sent and stored under it.
+    settings["openai_reasoning_effort"] = "high"
+    pipeline.run(root / truths[0].file)
+
+    assert sent == [{"openai_reasoning_effort": "none"}] * 2
+
+
 def test_other_model_settings_are_asked_again(samples, tmp_path: Path, model_ids) -> None:
     root, truths = samples
     profile = replace(shop_profile, screen_description="a shop's item list")

@@ -167,8 +167,10 @@ framelift run samples --profile examples.fantasy_shop:profile --model openai-cha
 (`Pipeline(..., model_settings={"openai_reasoning_effort": "none"})` in Python, `framelift eval
 --model-setting` for evaluations.) `--model-setting KEY=VALUE` can be repeated; VALUE is read as
 JSON, or else as a string, so `temperature=0` is a number and `openai_reasoning_effort=none` a
-string. Settings for another provider are ignored, so a `screen_model` of another provider is sent
-only the settings it takes. Keys are not checked: a misspelled one is ignored too.
+string; quote a string that would read as JSON (`openai_user='"12345"'`). Settings prefixed with
+another provider's name, such as `anthropic_`, are ignored, so a `screen_model` of another
+provider skips them. Settings without a prefix, such as `temperature` or `max_tokens`, go to the
+screen check and the extraction alike. Keys are not checked: a misspelled one is ignored too.
 
 ## Cache
 

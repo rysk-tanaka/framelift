@@ -159,8 +159,8 @@ class Cache:
             if not self._warned_settings:
                 self._warned_settings = True
                 warnings.warn(
-                    "framelift caches only model settings that JSON can hold; these are not "
-                    "cached, as they cannot be told apart",
+                    "framelift caches results only for model settings that JSON can hold; with "
+                    "these, no extraction or screen check is cached, as they cannot be told apart",
                     skip_file_prefixes=(_PACKAGE_DIR,),
                 )
             return None

@@ -69,6 +69,8 @@ class ScreenClassifier:
         self._model = resolve_model(model)
         self._max_retries = max_retries
         self._cache = cache
+        # A copy, so a change to the caller's dict cannot send settings the key was not made of.
+        model_settings = None if model_settings is None else model_settings.copy()
         self._model_id = (
             None if cache is None else cache.model_id(model, self._model, model_settings)
         )

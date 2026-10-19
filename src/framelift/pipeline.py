@@ -120,7 +120,8 @@ class Pipeline[OutputT: BaseModel]:
             ``screen_description``; ``None`` uses ``model``.
         model_settings: Pydantic AI model settings for every request, the screen check's too,
             e.g. ``{"openai_reasoning_effort": "none"}`` to turn off a local model's thinking.
-            Settings for another provider are ignored, so one model can be given its own.
+            Settings prefixed with another provider's name are ignored, so one model can be
+            given its own; settings without a prefix, such as ``max_tokens``, go to both.
         out_dir: Where to write ``observations.jsonl`` (and ``items.jsonl`` when the profile has
             an ``item_key``). ``None`` keeps results in memory only.
         max_retries: How many times a failed validation may ask the model to try again, for the
@@ -171,7 +172,6 @@ class Pipeline[OutputT: BaseModel]:
         cache = Cache(self.cache_dir) if self.cache_dir is not None else None
         self.screen_model: Model | str | None = None
         """The model the screen check uses; None when the profile has no screen_description."""
-        self.model_settings = model_settings
         self._extractor = Extractor(
             profile, model, max_retries=max_retries, cache=cache, model_settings=model_settings
         )

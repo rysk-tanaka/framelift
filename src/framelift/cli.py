@@ -141,7 +141,7 @@ ModelSetting = Annotated[
         metavar="KEY=VALUE",
         help="Pydantic AI model setting for every request, the screen check's too; repeatable. "
         "VALUE is read as JSON, or else as a string, e.g. openai_reasoning_effort=none or "
-        "temperature=0",
+        "temperature=0; quote a string that would read as JSON, e.g. openai_user='\"12345\"'",
     ),
 ]
 
