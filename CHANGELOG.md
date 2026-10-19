@@ -5,6 +5,8 @@ All notable changes to this project are documented here. This project follows
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-19
+
 ### Added
 
 - `Pipeline(model_settings=...)` and `--model-setting KEY=VALUE` on `run` and `eval` send Pydantic
@@ -145,7 +147,8 @@ All notable changes to this project are documented here. This project follows
 - `framelift run` and `framelift synth` CLI commands
 - Synthetic fictional-shop sample generator
 
-[Unreleased]: https://github.com/rysk-tanaka/framelift/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/rysk-tanaka/framelift/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/rysk-tanaka/framelift/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/rysk-tanaka/framelift/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/rysk-tanaka/framelift/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/rysk-tanaka/framelift/compare/v0.2.0...v0.3.0

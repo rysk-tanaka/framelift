@@ -8,14 +8,15 @@ framelift turns screenshots and screen recordings into validated, provenance-tag
 > **Status:** pre-alpha (0.x). The public API is limited to `Profile` and `Pipeline`
 > and may change between minor versions.
 
-## Features (0.5)
+## Features (0.6)
 
 - Image and video input (files, directories, glob patterns), each tagged with its SHA-256
 - Videos are read once per still screen: frames are sampled, scrolling frames are skipped, and the
   sharpest frame of each still screen is sent
 - Structured extraction with [Pydantic AI](https://ai.pydantic.dev/): your model is the output type,
   your validators trigger automatic retries
-- Model-agnostic: pass any `provider:model` string supported by Pydantic AI
+- Model-agnostic: pass any `provider:model` string supported by Pydantic AI, with model settings
+  such as turning off a local model's thinking
 - Only the part of the screen you choose is sent: crop each orientation to a box and paint over
   areas such as a chat window before anything leaves your machine
 - An optional screen check: images of other screens are skipped before extraction
