@@ -135,7 +135,7 @@ framelift eval（framelift[eval] が必要）
 
 - `live` マーカーのテスト（`tests/test_live.py`）以外は実モデルを呼ばない。`tests/conftest.py` で `models.ALLOW_MODEL_REQUESTS = False` にしていて、live テストだけがテストの中で `True` に戻す
 - ローカルのサーバーの接続先や応答のモデル名が要るテストは、`tests/conftest.py` の `answering_model` フィクスチャ（`AnsweringModel`）でモデルを作る
-- モデルの応答は `FunctionModel` で組み立てる。抽出の出力はツール呼び出しなので、`ToolCallPart(info.output_tools[0].name, {...})` で返す。画面判定は `FunctionModel` では JSON のテキストで答えるので、判定にも答えるモデルは `tests/answers.py` の `output_name`・`respond_with` を使う
+- モデルの応答は `FunctionModel` で組み立てる。抽出の出力はツール呼び出しなので、`ToolCallPart(info.output_tools[0].name, {...})` で返す。画面判定は、ローカルのサーバーとして作ったモデル（`answering_model`）では JSON のテキスト、ほかではツール呼び出しで答えるので、判定にも答えるモデルは `tests/answers.py` の `output_name`・`respond_with` を使う
 - 再試行の確認は、1 回目に検証を通らない値、2 回目に正しい値を返す `FunctionModel` で行う
 - CLI のテストは `--model test`（Pydantic AI 組み込みのテスト用モデル）と `typer.testing.CliRunner` を使う。モデルの文字列の解決を確かめるテストだけは `openai:<name>` などを渡し、`extract.infer_model` を差し替えるか、`OPENAI_*` の環境変数を `monkeypatch` で決める
 - 画像は `samples` フィクスチャ（`synth.generate`）、動画は `scrolling_video` フィクスチャ（`synth.generate_video`）で作る。テスト用の画像・動画ファイルを置かない
