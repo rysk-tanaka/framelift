@@ -140,6 +140,7 @@ framelift eval（framelift[eval] が必要）
 - CLI のテストは `--model test`（Pydantic AI 組み込みのテスト用モデル）と `typer.testing.CliRunner` を使う。モデルの文字列の解決を確かめるテストだけは `openai:<name>` などを渡し、`extract.infer_model` を差し替えるか、`OPENAI_*` の環境変数を `monkeypatch` で決める
 - 画像は `samples` フィクスチャ（`synth.generate`）、動画は `scrolling_video` フィクスチャ（`synth.generate_video`）で作る。テスト用の画像・動画ファイルを置かない
 - 実モデルを使うテストには `@pytest.mark.live` を付ける（既定では実行されない）
+- DeprecationWarning・PendingDeprecationWarning・FutureWarning は、framelift のモジュールのものとして出たときだけテストでエラーになる（`pyproject.toml` の `filterwarnings`）。どのモジュールのものになるかは、警告を出すライブラリが `stacklevel` で指す呼び出し元で決まる。ライブラリが自分の中を指すと、framelift の古い呼び方が原因でもエラーにならないので、テストの警告の一覧も見る
 
 ### ドキュメント
 

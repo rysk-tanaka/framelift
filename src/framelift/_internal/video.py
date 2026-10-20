@@ -250,7 +250,7 @@ class _Sample:
         small = np.asarray(small_image, dtype=np.float32)
         small_shown = None
         if shown is not None:
-            mask = Image.fromarray(shown.astype(np.float32), mode="F")
+            mask = Image.fromarray(shown.astype(np.float32))
             small_shown = np.asarray(mask.resize(size, Image.Resampling.BILINEAR))
         sharp = _laplacian_variance(gray.astype(np.float32), shown)
         return cls(round(time * 1000), small, small_shown, sharp, render)
