@@ -8,9 +8,10 @@ animation such as a clock. Only the sharpest sample of each still screen is sent
 scrolling frames are not read (a video that never stands still is read once, from its sharpest
 sample). A screen shown for less than about two samples can be missed, and so can the screens
 passed during a slow scroll that never stops: pause on each screen you want read.
-Movement is measured on the part of the screen that is sent: the `locate` crop, leaving out the
-tiles that `redact` mostly covers, so redacting an animated area, such as a character beside the
-list, keeps it from splitting a still screen, and `--motion-threshold` is a share of those tiles.
+Movement is measured on the part of the screen that is sent: the `locate` crop, with each tile
+counted by how much of it `redact` leaves visible, so redacting an animated area, such as a
+character beside the list, keeps it from splitting a still screen, and `--motion-threshold` is a
+share of what is left. A change of resolution midway does not split a still screen by itself.
 To see which frames would be sent, without calling a model:
 
 ```bash

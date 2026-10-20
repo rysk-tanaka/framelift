@@ -17,6 +17,7 @@ from PIL import Image, ImageDraw
 
 from framelift._internal import synth, video
 from framelift._internal.layout import Layout
+from framelift.profile import Orientation
 
 pytest.importorskip("av")
 
@@ -340,16 +341,135 @@ def test_a_change_beside_a_wide_redaction_is_still_a_new_screen(tmp_path: Path) 
     assert len(list(video.sample_video(path, layout=corner_only))) == 2
 
 
+@pytest.mark.parametrize(("before", "after"), [((320, 240), (256, 192)), ((1280, 720), (854, 480))])
+def test_a_change_of_resolution_alone_does_not_split_a_still_screen(
+    before: tuple[int, int], after: tuple[int, int]
+) -> None:
+    screen, page = _view(seed=3).render(0), _view(seed=4).render(0)
+    first = video._Sample.of(screen.resize(before), 0)
+    threshold = video.DEFAULT_MOTION_THRESHOLD
+
+    assert video._difference(first, video._Sample.of(screen.resize(after), 0)) <= threshold
+    assert video._difference(first, video._Sample.of(page.resize(after), 0)) > threshold
+
+
+def _with_shown(
+    gray: np.ndarray, left: float, right: float, orientation: Orientation
+) -> video._Sample:
+    """A sample of ``gray`` with only its columns from ``left`` to ``right`` (fractions) shown,
+    cropped from a screen of ``orientation``."""
+    shown = np.zeros(gray.shape, dtype=np.bool_)
+    width = gray.shape[1]
+    shown[:, round(left * width) : round(right * width)] = True
+    masked = np.where(shown, gray, 0).astype(np.uint8)
+    return video._Sample.of_gray(masked, 0, _render, shown, orientation=orientation)
+
+
+def test_a_turned_screen_is_a_different_screen() -> None:
+    screen = np.asarray(_view().render(0).convert("L"))
+    landscape = video._Sample.of_gray(np.ascontiguousarray(screen[:480, :640]), 0, _render)
+    portrait = video._Sample.of_gray(np.ascontiguousarray(screen[:640, :480]), 0, _render)
+    assert video._difference(landscape, portrait) == 1.0
+    # Crops of one shape from screens of either orientation, whose redactions share nothing:
+    # what decides is the screen's orientation, not the crop's.
+    crop = np.ascontiguousarray(screen[:480, :320])
+    left = _with_shown(crop, 0.0, 0.25, "landscape")
+    right = _with_shown(crop, 0.75, 1.0, "portrait")
+    assert video._difference(left, right) == 1.0
+
+
+def test_after_the_resolution_changes_the_frame_with_more_pixels_is_sent() -> None:
+    screen = _view().render(0)
+    big = video._Sample.of(screen, 0)
+    small = video._Sample.of(screen.resize((854, 480)), 1)
+    segmenter = video._Segmenter(video.DEFAULT_MOTION_THRESHOLD, video.MIN_STILL_SAMPLES)
+
+    # Shrunk, the screen has the higher variance of the Laplacian, but less to read.
+    assert small.sharpness > big.sharpness
+    assert _run(segmenter, [big, small]) == [0]
+
+
+def _column_pages() -> list[Image.Image]:
+    """A still screen whose column at x 600-630 shows one page of text, then another."""
+    frames = []
+    for seed in (5, 6):
+        page = _view().render(0)
+        draw = ImageDraw.Draw(page)
+        draw.rectangle((600, 0, 630, 720), fill=(255, 255, 255))
+        pick = random.Random(seed)
+        for row in range(36):
+            if pick.random() < 0.5:
+                draw.rectangle((604, row * 20 + 4, 626, row * 20 + 16), fill=(0, 0, 0))
+        frames += [page] * 15
+    return frames
+
+
+def test_a_change_in_a_narrow_strip_left_unredacted_is_a_new_screen(tmp_path: Path) -> None:
+    path = tmp_path / "column.mp4"
+    synth.write_video(path, _column_pages(), fps=FPS)
+    # Only the column is shown, under half of every tile it crosses.
+    column_only = Layout(
+        locate="full",
+        redact={"landscape": ((0.0, 0.0, 600 / 1280, 1.0), (630 / 1280, 0.0, 1.0, 1.0))},
+    )
+
+    assert len(list(video.sample_video(path, layout=column_only))) == 2
+
+
+def test_a_change_in_the_row_beside_a_redaction_counts() -> None:
+    before = np.full((256, 256), 128, dtype=np.uint8)
+    after = before.copy()
+    # Rows 137-143 are the shown part (7 of 16 rows) of the tiles cut by the redaction.
+    after[137:144] = 255
+    shown = np.ones(before.shape, dtype=np.bool_)
+    shown[:137] = False
+    a, b = (
+        video._Sample.of_gray(np.where(shown, gray, 0).astype(np.uint8), 0, _render, shown)
+        for gray in (before, after)
+    )
+
+    assert video._difference(a, b) > video.DEFAULT_MOTION_THRESHOLD
+
+
 def _render() -> Image.Image:
     return Image.new("L", (1, 1))
 
 
-def test_a_small_crop_is_not_enlarged_for_the_movement_check() -> None:
+def test_a_sample_is_shrunk_a_few_times_and_to_at_most_256_a_side() -> None:
     band = video._Sample.of_gray(np.zeros((72, 1280), dtype=np.uint8), 0, _render)
-    screen = video._Sample.of_gray(np.zeros((720, 1280), dtype=np.uint8), 0, _render)
+    screen = video._Sample.of_gray(np.zeros((1080, 1920), dtype=np.uint8), 0, _render)
+    thin = video._Sample.of_gray(np.zeros((8, 400), dtype=np.uint8), 0, _render)
 
-    assert band.small.shape == (64, 256)
+    assert band.small.shape == (16, 256)
     assert screen.small.shape == (256, 256)
+    # Under 16 a side, the only case enlarged, so that there are still 16 x 16 tiles.
+    assert thin.small.shape == (16, 160)
+
+
+def _write_compressed(path: Path, frames: list[Image.Image], *, crf: int, keyframes: int) -> None:
+    """Encode ``frames`` as H.264 at quality ``crf``, with a keyframe every ``keyframes`` frames:
+    each keyframe encodes the still screen anew, which flickers more the harder it compresses."""
+    import av
+
+    with av.open(str(path), mode="w") as container:
+        options = {"crf": str(crf), "g": str(keyframes)}
+        stream = container.add_stream("libx264", rate=FPS, options=options)
+        stream.pix_fmt = "yuv420p"
+        stream.width, stream.height = frames[0].size
+        for image in frames:
+            container.mux(stream.encode(av.VideoFrame.from_image(image)))
+        container.mux(stream.encode())
+
+
+def test_codec_noise_does_not_split_a_still_screen_in_a_small_crop(tmp_path: Path) -> None:
+    view = _view()
+    path = tmp_path / "compressed.mp4"
+    # Compressed as a recorder might, with a keyframe every 0.5 s; then scrolled by two rows.
+    _write_compressed(path, [view.render(0)] * 20 + [view.render(168)] * 20, crf=28, keyframes=5)
+    small = Layout(locate={"landscape": (100 / 1280, 200 / 720, 260 / 1280, 300 / 720)}, redact={})
+
+    picked = [frame.timestamp_ms for frame in video.sample_video(path, layout=small)]
+    assert len(picked) == 2 and picked[0] < 2000 <= picked[1]
 
 
 def test_a_crop_too_thin_for_the_laplacian_has_no_sharpness() -> None:
@@ -368,6 +488,78 @@ def test_the_edges_of_a_redaction_do_not_count_as_sharpness() -> None:
 
     assert video._Sample.of_gray(gray, 0, _render).sharpness > 0
     assert video._Sample.of_gray(gray, 0, _render, shown).sharpness == 0
+
+
+def test_a_cropped_sample_and_a_whole_screen_are_different_screens() -> None:
+    gray = np.full((256, 256), 128, dtype=np.uint8)
+    cropped = video._Sample.of_gray(gray, 0, _render)
+    whole = video._Sample.of_gray(gray, 0, _render, sendable=False)
+
+    assert video._difference(cropped, whole) == 1.0
+    assert video._difference(whole, cropped) == 1.0
+
+
+def test_a_redacted_sample_and_one_without_redactions_are_different_screens() -> None:
+    gray = np.full((256, 256), 128, dtype=np.uint8)
+    shown = np.ones(gray.shape, dtype=np.bool_)
+    shown[:, :128] = False
+    redacted = video._Sample.of_gray(np.where(shown, gray, 0).astype(np.uint8), 0, _render, shown)
+    plain = video._Sample.of_gray(gray, 0, _render)
+
+    assert video._difference(redacted, plain) == 1.0
+    assert video._difference(plain, redacted) == 1.0
+
+
+def test_a_video_that_never_stands_still_falls_back_to_a_sample_it_can_crop() -> None:
+    rng = np.random.default_rng(0)
+    segmenter = video._Segmenter(video.DEFAULT_MOTION_THRESHOLD, video.MIN_STILL_SAMPLES)
+    # Noise is far sharper than the smooth gradient, but the layout has no crop for it.
+    smooth = np.tile(np.linspace(0, 255, 256, dtype=np.uint8), (256, 1))
+    samples = [
+        video._Sample.of_gray(
+            rng.integers(0, 256, (256, 256), dtype=np.uint8), 0, _render, sendable=False
+        ),
+        video._Sample.of_gray(smooth, 1, _render),
+        video._Sample.of_gray(
+            rng.integers(0, 256, (256, 256), dtype=np.uint8), 2, _render, sendable=False
+        ),
+    ]
+    frames = [frame for sample in samples for frame in segmenter.add(sample)]
+    frames += segmenter.finish()
+
+    assert [frame.timestamp_ms for frame in frames] == [1000]
+
+
+def _run(segmenter: video._Segmenter, samples: list[video._Sample]) -> list[int]:
+    frames = [frame for sample in samples for frame in segmenter.add(sample)]
+    frames += segmenter.finish()
+    return [frame.timestamp_ms for frame in frames]
+
+
+def test_a_view_the_layout_cannot_crop_splits_even_at_a_threshold_of_1() -> None:
+    smooth = np.tile(np.linspace(0, 255, 256, dtype=np.uint8), (256, 1))
+    noise = np.random.default_rng(0).integers(0, 256, (256, 256), dtype=np.uint8)
+    cropped = [video._Sample.of_gray(smooth, t, _render) for t in (0, 1)]
+    whole = [video._Sample.of_gray(noise, t, _render, sendable=False) for t in (2, 3)]
+    segmenter = video._Segmenter(1.0, video.MIN_STILL_SAMPLES)
+
+    # One segment would have sent only the sharper sample, which cannot be cropped.
+    assert _run(segmenter, cropped + whole) == [0, 2000]
+
+
+def test_a_video_still_only_where_the_layout_cannot_crop_also_sends_one_it_can() -> None:
+    rng = np.random.default_rng(0)
+    still = rng.integers(0, 256, (256, 256), dtype=np.uint8)
+    whole = [video._Sample.of_gray(still, t, _render, sendable=False) for t in (0, 1)]
+    # Then only scrolling where the layout can crop: no still segment of its own.
+    moving = [
+        video._Sample.of_gray(rng.integers(0, 256, (256, 256), dtype=np.uint8), t, _render)
+        for t in (2, 3, 4)
+    ]
+    segmenter = video._Segmenter(video.DEFAULT_MOTION_THRESHOLD, video.MIN_STILL_SAMPLES)
+
+    picked = _run(segmenter, whole + moving)
+    assert len(picked) == 2 and picked[0] < 2000 <= picked[1]
 
 
 @pytest.mark.parametrize(
