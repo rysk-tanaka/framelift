@@ -5,6 +5,12 @@ All notable changes to this project are documented here. This project follows
 
 ## [Unreleased]
 
+### Changed
+
+- Reading a video holds at most two decoded frames, the current still screen's best and the
+  fallback for a video that never stands still; the samples it compares with keep only their
+  small copies. The frames picked do not change
+
 ### Fixed
 
 - In a video whose screens the layout can crop only some of the time (the resolution or the

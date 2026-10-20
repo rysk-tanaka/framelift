@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import gc
 import itertools
 import random
 import sys
 import warnings
+import weakref
 from collections.abc import Iterator
 from fractions import Fraction
 from pathlib import Path
@@ -32,6 +34,10 @@ def scrolling(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, synth.Sam
 
 def _view(seed: int = 3) -> synth.ListView:
     return synth.ListView(synth._random_truth(random.Random(seed), "x", "landscape", count=12))
+
+
+def _diff(a: video._Sample, b: video._Sample) -> float:
+    return video._difference(a.measured, b.measured)
 
 
 def _hold_of(sample: synth.SampleVideo, timestamp_ms: int) -> int | None:
@@ -74,7 +80,7 @@ def test_a_slow_scroll_does_not_merge_the_screens_around_it(tmp_path: Path) -> N
     frames = list(video.sample_video(path))
 
     def difference(a: Image.Image, b: Image.Image) -> float:
-        return video._difference(video._Sample.of(a, 0), video._Sample.of(b, 0))
+        return _diff(video._Sample.of(a, 0), video._Sample.of(b, 0))
 
     threshold = video.DEFAULT_MOTION_THRESHOLD
     # The first and last frames show the screens before and after the scroll; one segment
@@ -349,8 +355,8 @@ def test_a_change_of_resolution_alone_does_not_split_a_still_screen(
     first = video._Sample.of(screen.resize(before), 0)
     threshold = video.DEFAULT_MOTION_THRESHOLD
 
-    assert video._difference(first, video._Sample.of(screen.resize(after), 0)) <= threshold
-    assert video._difference(first, video._Sample.of(page.resize(after), 0)) > threshold
+    assert _diff(first, video._Sample.of(screen.resize(after), 0)) <= threshold
+    assert _diff(first, video._Sample.of(page.resize(after), 0)) > threshold
 
 
 def _with_shown(
@@ -369,13 +375,13 @@ def test_a_turned_screen_is_a_different_screen() -> None:
     screen = np.asarray(_view().render(0).convert("L"))
     landscape = video._Sample.of_gray(np.ascontiguousarray(screen[:480, :640]), 0, _render)
     portrait = video._Sample.of_gray(np.ascontiguousarray(screen[:640, :480]), 0, _render)
-    assert video._difference(landscape, portrait) == 1.0
+    assert _diff(landscape, portrait) == 1.0
     # Crops of one shape from screens of either orientation, whose redactions share nothing:
     # what decides is the screen's orientation, not the crop's.
     crop = np.ascontiguousarray(screen[:480, :320])
     left = _with_shown(crop, 0.0, 0.25, "landscape")
     right = _with_shown(crop, 0.75, 1.0, "portrait")
-    assert video._difference(left, right) == 1.0
+    assert _diff(left, right) == 1.0
 
 
 def test_after_the_resolution_changes_the_frame_with_more_pixels_is_sent() -> None:
@@ -428,7 +434,7 @@ def test_a_change_in_the_row_beside_a_redaction_counts() -> None:
         for gray in (before, after)
     )
 
-    assert video._difference(a, b) > video.DEFAULT_MOTION_THRESHOLD
+    assert _diff(a, b) > video.DEFAULT_MOTION_THRESHOLD
 
 
 def _render() -> Image.Image:
@@ -440,10 +446,10 @@ def test_a_sample_is_shrunk_a_few_times_and_to_at_most_256_a_side() -> None:
     screen = video._Sample.of_gray(np.zeros((1080, 1920), dtype=np.uint8), 0, _render)
     thin = video._Sample.of_gray(np.zeros((8, 400), dtype=np.uint8), 0, _render)
 
-    assert band.small.shape == (16, 256)
-    assert screen.small.shape == (256, 256)
+    assert band.measured.small.shape == (16, 256)
+    assert screen.measured.small.shape == (256, 256)
     # Under 16 a side, the only case enlarged, so that there are still 16 x 16 tiles.
-    assert thin.small.shape == (16, 160)
+    assert thin.measured.small.shape == (16, 160)
 
 
 def _write_compressed(path: Path, frames: list[Image.Image], *, crf: int, keyframes: int) -> None:
@@ -495,8 +501,8 @@ def test_a_cropped_sample_and_a_whole_screen_are_different_screens() -> None:
     cropped = video._Sample.of_gray(gray, 0, _render)
     whole = video._Sample.of_gray(gray, 0, _render, sendable=False)
 
-    assert video._difference(cropped, whole) == 1.0
-    assert video._difference(whole, cropped) == 1.0
+    assert _diff(cropped, whole) == 1.0
+    assert _diff(whole, cropped) == 1.0
 
 
 def test_a_redacted_sample_and_one_without_redactions_are_different_screens() -> None:
@@ -506,8 +512,8 @@ def test_a_redacted_sample_and_one_without_redactions_are_different_screens() ->
     redacted = video._Sample.of_gray(np.where(shown, gray, 0).astype(np.uint8), 0, _render, shown)
     plain = video._Sample.of_gray(gray, 0, _render)
 
-    assert video._difference(redacted, plain) == 1.0
-    assert video._difference(plain, redacted) == 1.0
+    assert _diff(redacted, plain) == 1.0
+    assert _diff(plain, redacted) == 1.0
 
 
 def test_a_video_that_never_stands_still_falls_back_to_a_sample_it_can_crop() -> None:
@@ -560,6 +566,42 @@ def test_a_video_still_only_where_the_layout_cannot_crop_also_sends_one_it_can()
 
     picked = _run(segmenter, whole + moving)
     assert len(picked) == 2 and picked[0] < 2000 <= picked[1]
+
+
+class _Frame:
+    """Stands for a decoded frame, which a sample's render holds."""
+
+
+def test_only_the_best_sample_and_the_fallback_hold_a_decoded_frame() -> None:
+    rng = np.random.default_rng(0)
+    screens = [rng.integers(0, 256, (256, 256), dtype=np.uint8) for _ in range(2)]
+    frames: list[weakref.ref[_Frame]] = []
+
+    def sample(gray: np.ndarray, t: int) -> video._Sample:
+        frame = _Frame()
+        frames.append(weakref.ref(frame))
+
+        def render() -> Image.Image:
+            assert frame is not None
+            return _render()
+
+        return video._Sample.of_gray(gray, t, render)
+
+    def held() -> list[int]:
+        gc.collect()
+        return [i for i, ref in enumerate(frames) if ref() is not None]
+
+    segmenter = video._Segmenter(video.DEFAULT_MOTION_THRESHOLD, video.MIN_STILL_SAMPLES)
+    for t in range(4):
+        assert list(segmenter.add(sample(screens[0], t))) == []
+    # The first sample is the best so far and the fallback; the first and previous samples of
+    # the segment are compared by their small copies only.
+    assert held() == [0]
+
+    picked = [frame for t in range(4, 7) for frame in segmenter.add(sample(screens[1], t))]
+    assert [frame.timestamp_ms for frame in picked] == [0]
+    # Once a sample was sent, nothing of the segment before is held, nor a fallback.
+    assert held() == [4]
 
 
 @pytest.mark.parametrize(

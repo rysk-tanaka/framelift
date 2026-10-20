@@ -191,7 +191,7 @@ def _tiles(values: NDArray[np.float32]) -> NDArray[np.float32]:
     return values.reshape(_TILES, height // _TILES, _TILES, width // _TILES).sum(axis=(1, 3))
 
 
-def _same_view(a: _Sample, b: _Sample) -> bool:
+def _same_view(a: _Measured, b: _Measured) -> bool:
     """Whether two samples measured the same view: screens of one orientation, both cropped by
     the layout or both measured whole, both redacted or neither. The layout's crop and
     redactions depend only on the orientation, so such samples measured the same part of the
@@ -212,7 +212,7 @@ def _resized(values: NDArray[np.float32], shape: tuple[int, int]) -> NDArray[np.
     return np.asarray(image, dtype=np.float32)
 
 
-def _difference(a: _Sample, b: _Sample) -> float:
+def _difference(a: _Measured, b: _Measured) -> float:
     """The share of tiles (0-1) that changed between two samples, each tile counted by how much
     of it is not redacted; 1 for samples that did not measure the same view (see `_same_view`).
 
@@ -262,23 +262,32 @@ def _laplacian_variance(gray: NDArray[np.float32], shown: NDArray[np.bool_] | No
     return float(laplacian[clear].var()) if clear.any() else 0.0
 
 
-@dataclass(frozen=True)
-class _Sample:
-    timestamp_ms: int
+@dataclass(frozen=True, eq=False)
+class _Measured:
+    """What a sample is compared by. Holds no decoded frame, so it can be kept for comparing
+    while the frame is let go. Compared by identity: its fields are arrays."""
+
     small: NDArray[np.float32]
     shown: NDArray[np.float32] | None
     """How much of each pixel of ``small`` is not redacted (0-1); ``None`` when none is."""
-    sharpness: float
-    render: Callable[[], Image.Image]
-    """Builds the full, upright color image; called only for a sample that is picked."""
     sendable: bool
     """False when the layout had no crop for the screen, so the whole screen was measured and
     `frame_to_source` cannot send the sample."""
     orientation: Orientation
     """Of the whole screen, which decides the layout's crop and redactions: upright with a
     layout; without one, as decoded, which is the same for every sample of a stream."""
+
+
+@dataclass(frozen=True)
+class _Sample:
+    timestamp_ms: int
+    measured: _Measured
+    sharpness: float
+    render: Callable[[], Image.Image]
+    """Builds the full, upright color image; called only for a sample that is picked. Holds the
+    decoded frame."""
     pixels: int
-    """How many pixels were measured, before they were shrunk to ``small``."""
+    """How many pixels were measured, before they were shrunk to ``measured.small``."""
 
     @classmethod
     def of_gray(
@@ -304,16 +313,8 @@ class _Sample:
             mask = Image.fromarray(shown.astype(np.float32))
             small_shown = np.asarray(mask.resize(size, Image.Resampling.BILINEAR))
         sharp = _laplacian_variance(gray.astype(np.float32), shown)
-        return cls(
-            round(time * 1000),
-            small,
-            small_shown,
-            sharp,
-            render,
-            sendable,
-            orientation,
-            height * width,
-        )
+        measured = _Measured(small, small_shown, sendable, orientation)
+        return cls(round(time * 1000), measured, sharp, render, height * width)
 
     @classmethod
     def of(cls, image: Image.Image, time: float) -> _Sample:
@@ -323,16 +324,17 @@ class _Sample:
 class _Segmenter:
     """Splits samples into still segments and yields each segment's sharpest sample.
 
-    Keeps a constant amount of state, so long videos do not grow memory: the current segment's
-    best sample, the small copies of its first and of the previous sample, and (until a segment
-    the layout can crop is kept) the sharpest sample so far as a fallback.
+    Keeps a constant amount of state, so long videos do not grow memory. Of the decoded frames,
+    it holds only the current segment's best sample's and (until a sample the layout can crop is
+    yielded) the fallback's; the segment's first and the previous sample keep only what they are
+    compared by. `sample_video` holds the frames it is decoding besides.
     """
 
     def __init__(self, motion_threshold: float, min_still_samples: int) -> None:
         self._threshold = motion_threshold
         self._min_samples = min_still_samples
-        self._first: _Sample | None = None
-        self._previous: _Sample | None = None
+        self._first: _Measured | None = None
+        self._previous: _Measured | None = None
         self._best: _Sample | None = None
         self._count = 0
         self._fallback: _Sample | None = None
@@ -345,17 +347,18 @@ class _Segmenter:
             # Comparing with the segment's first sample too catches slow scrolling, which moves
             # little between samples but replaces the whole screen over time.
             # Another view splits even at a threshold of 1, which a share of 1 does not exceed.
+            measured = sample.measured
             moved = (
-                not _same_view(sample, self._previous)
-                or _difference(sample, self._previous) > self._threshold
-                or _difference(sample, self._first) > self._threshold
+                not _same_view(measured, self._previous)
+                or _difference(measured, self._previous) > self._threshold
+                or _difference(measured, self._first) > self._threshold
             )
             if moved:
                 yield from self._close()
         if self._count == 0:
-            self._first = sample
+            self._first = sample.measured
         self._count += repeats
-        self._previous = sample
+        self._previous = sample.measured
         # More pixels first: after the resolution changed, a segment holds both, and a frame
         # shrunk to fewer pixels has a higher variance of the Laplacian without being sharper.
         if self._best is None or (sample.pixels, sample.sharpness) > (
@@ -366,8 +369,8 @@ class _Segmenter:
         # The fallback is sent, so a sample the layout can crop beats a sharper one it cannot.
         if not self._sent and (
             self._fallback is None
-            or (sample.sendable, sample.pixels, sample.sharpness)
-            > (self._fallback.sendable, self._fallback.pixels, self._fallback.sharpness)
+            or (sample.measured.sendable, sample.pixels, sample.sharpness)
+            > (self._fallback.measured.sendable, self._fallback.pixels, self._fallback.sharpness)
         ):
             self._fallback = sample
 
@@ -376,7 +379,11 @@ class _Segmenter:
         # A video that never stood still still gets read once, from its sharpest sample; so does
         # one that stood still only where the layout cannot crop, from a sample it can.
         fallback = self._fallback
-        if not self._sent and fallback is not None and (self._emitted == 0 or fallback.sendable):
+        if (
+            not self._sent
+            and fallback is not None
+            and (self._emitted == 0 or fallback.measured.sendable)
+        ):
             yield self._emit(fallback)
 
     def _close(self) -> Iterator[VideoFrame]:
@@ -395,7 +402,7 @@ class _Segmenter:
             sharpness=sample.sharpness,
         )
         self._emitted += 1
-        if sample.sendable:
+        if sample.measured.sendable:
             self._sent = True
             self._fallback = None
         return frame
