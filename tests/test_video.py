@@ -340,6 +340,48 @@ def test_a_change_beside_a_wide_redaction_is_still_a_new_screen(tmp_path: Path) 
     assert len(list(video.sample_video(path, layout=corner_only))) == 2
 
 
+def _column_pages() -> list[Image.Image]:
+    """A still screen whose column at x 600-630 shows one page of text, then another."""
+    frames = []
+    for seed in (5, 6):
+        page = _view().render(0)
+        draw = ImageDraw.Draw(page)
+        draw.rectangle((600, 0, 630, 720), fill=(255, 255, 255))
+        pick = random.Random(seed)
+        for row in range(36):
+            if pick.random() < 0.5:
+                draw.rectangle((604, row * 20 + 4, 626, row * 20 + 16), fill=(0, 0, 0))
+        frames += [page] * 15
+    return frames
+
+
+def test_a_change_in_a_narrow_strip_left_unredacted_is_a_new_screen(tmp_path: Path) -> None:
+    path = tmp_path / "column.mp4"
+    synth.write_video(path, _column_pages(), fps=FPS)
+    # Only the column is shown, under half of every tile it crosses.
+    column_only = Layout(
+        locate="full",
+        redact={"landscape": ((0.0, 0.0, 600 / 1280, 1.0), (630 / 1280, 0.0, 1.0, 1.0))},
+    )
+
+    assert len(list(video.sample_video(path, layout=column_only))) == 2
+
+
+def test_a_change_in_the_row_beside_a_redaction_counts() -> None:
+    before = np.full((256, 256), 128, dtype=np.uint8)
+    after = before.copy()
+    # Rows 137-143 are the shown part (7 of 16 rows) of the tiles cut by the redaction.
+    after[137:144] = 255
+    shown = np.ones(before.shape, dtype=np.bool_)
+    shown[:137] = False
+    a, b = (
+        video._Sample.of_gray(np.where(shown, gray, 0).astype(np.uint8), 0, _render, shown)
+        for gray in (before, after)
+    )
+
+    assert video._difference(a, b) > video.DEFAULT_MOTION_THRESHOLD
+
+
 def _render() -> Image.Image:
     return Image.new("L", (1, 1))
 

@@ -11,8 +11,9 @@ not sent; only a video that never stands still is read once, from its sharpest s
 
 Given a `Layout`, movement and sharpness are measured on the part of the screen that is sent, so
 that movement elsewhere (a character's idle animation beside the list being read) does not split
-a still screen. Tiles mostly redacted are left out of the share that changed, so a wide redaction
-does not hide the change in the rest, and the sharpness leaves out the edges of redactions. A
+a still screen. Each tile counts toward the share that changed by how much of it is not
+redacted, so a wide redaction does not hide the change in the rest, nor a narrow strip left
+unredacted its own; the sharpness leaves out the edges of redactions. A
 small crop is shrunk less, never enlarged, so that a tile keeps the pixels the threshold was
 measured with.
 
@@ -55,8 +56,6 @@ MIN_STILL_SAMPLES = 2
 _DIFF_SIZE = 256
 _TILES = 16
 _TILE_CHANGE = 3.0
-# A tile at least this much redacted is left out of the share of tiles that changed.
-_TILE_SHOWN = 0.5
 # Sampling instants are computed in floating point; without a tolerance, 0.1 + 0.1 + 0.1 lands
 # just after a frame at 0.3 s and the instant would be credited to the frame before it.
 _TIME_TOLERANCE = 1e-6
@@ -194,9 +193,9 @@ def _same_view(a: _Sample, b: _Sample) -> bool:
 
 
 def _difference(a: _Sample, b: _Sample) -> float:
-    """The share of tiles (0-1) that changed between two samples, among the tiles mostly not
-    redacted; 1 for samples of different sizes, as after the screen turned, and for a sample
-    cropped and one measured on the whole screen, which show different things."""
+    """The share of tiles (0-1) that changed between two samples, each tile counted by how much
+    of it is not redacted; 1 for samples of different sizes, as after the screen turned, and for
+    a sample cropped and one measured on the whole screen, which show different things."""
     if a.small.shape != b.small.shape or not _same_view(a, b):
         return 1.0
     if a.shown is None or b.shown is None:
@@ -207,11 +206,13 @@ def _difference(a: _Sample, b: _Sample) -> float:
     # size share their redactions; the smaller mask keeps the comparison the same both ways.
     shown = np.minimum(a.shown, b.shown)
     weight = _tiles(shown)
-    counted = weight >= _TILE_SHOWN * shown.size / _TILES**2
-    if not counted.any():
-        return 0.0
+    total = weight.sum()
+    if total <= 0:
+        return 0.0  # all redacted: nothing to compare
     means = _tiles(np.abs(a.small - b.small) * shown) / np.maximum(weight, 1e-9)
-    return float((means > _TILE_CHANGE)[counted].mean())
+    # Each tile counts by how much of it is shown, so a thin strip left unredacted, or a row
+    # beside a redaction, still counts; a tile barely shown, whose mean is noisy, barely does.
+    return float(weight[means > _TILE_CHANGE].sum() / total)
 
 
 def _laplacian_variance(gray: NDArray[np.float32], shown: NDArray[np.bool_] | None) -> float:
@@ -367,8 +368,8 @@ def sample_video(
     with fewer than ``min_still_samples`` samples are movement and are dropped, so a screen shown
     for less than about ``min_still_samples / frame_rate`` seconds can be missed. A video with no
     still segment yields its sharpest sample. With a ``layout``, both are measured on the part of
-    the screen it sends: the share counts only tiles mostly not redacted, and the sharpness only
-    pixels clear of redactions. The frames yielded are still whole screens.
+    the screen it sends: each tile counts toward the share by how much of it is not redacted, and
+    the sharpness only pixels clear of redactions. The frames yielded are still whole screens.
 
     Raises `MissingVideoExtraError` without PyAV and `UnreadableInputError` (a `ValueError`) for
     unreadable videos.

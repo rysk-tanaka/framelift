@@ -12,6 +12,9 @@ All notable changes to this project are documented here. This project follows
   longer compared as the same screen, even at `--motion-threshold 1`, and a video that never
   stands still where the layout can crop falls back to the sharpest sample it can crop rather
   than to a sharper one it cannot, which was reported as an error
+- With a layout, a change in a narrow strip left unredacted, or in the row beside a redaction,
+  splits a video's still screens again: each tile now counts toward the share that changed by how
+  much of it is shown, instead of tiles under half shown not counting at all
 
 ## [0.7.0] - 2026-10-19
 
