@@ -107,6 +107,19 @@ def encode_png(image: Image.Image) -> bytes:
     return buffer.getvalue()
 
 
+def cut(
+    gray: NDArray[np.uint8], box: tuple[int, int, int, int], shown: NDArray[np.bool_] | None
+) -> NDArray[np.uint8]:
+    """The pixels ``box`` (left, top, right, bottom) of an upright grayscale screen, with those
+    not ``shown`` set to 0, as `Layout.mask` gives them."""
+    left, top, right, bottom = box
+    # Cropped first, so that a redaction copies only the part that is sent.
+    view = gray[top:bottom, left:right]
+    if shown is None:
+        return view
+    return np.where(shown, view, 0).astype(np.uint8)
+
+
 @dataclass(frozen=True)
 class Layout:
     """What to send of each screen."""
@@ -150,24 +163,22 @@ class Layout:
             screen = screen.crop(_pixels(bbox, screen.size))
         return screen, Crop(orientation=orientation, size=size, bbox=bbox, redact=list(redact))
 
-    def visible(
-        self, gray: NDArray[np.uint8]
-    ) -> tuple[NDArray[np.uint8], NDArray[np.bool_] | None]:
-        """The part of an upright grayscale screen that `apply` sends, and which of its pixels
-        are not redacted (``None`` when none are); redacted pixels are 0.
+    def mask(
+        self, size: tuple[int, int]
+    ) -> tuple[tuple[int, int, int, int], NDArray[np.bool_] | None]:
+        """For an upright screen of ``size``, the pixels `apply` crops to (left, top, right,
+        bottom) and which pixels of the crop are not redacted (``None`` when none are).
 
-        Lets a video's still screens be told apart by what is sent. Raises `NoCropError` when
-        the screen's orientation has no crop box.
+        With `cut`, lets a video's still screens be told apart by what is sent. Depends only on
+        ``size``, so a video works it out only when the screen size changes. Raises
+        `NoCropError` when the screen's orientation has no crop box.
         """
-        height, width = gray.shape
-        size = (width, height)
         _, bbox, redact = self._boxes(size)
-        left, top, right, bottom = _pixels(bbox, size)
-        # Cropped first, so that a redaction copies only the part that is sent.
-        view = gray[top:bottom, left:right]
+        box = _pixels(bbox, size)
         if not redact:
-            return view, None
-        shown = np.ones(view.shape, dtype=np.bool_)
+            return box, None
+        left, top, right, bottom = box
+        shown = np.ones((bottom - top, right - left), dtype=np.bool_)
         for area in redact:
             area_left, area_top, area_right, area_bottom = _pixels(area, size)
             # In the crop's coordinates; a redaction outside the crop covers nothing.
@@ -175,7 +186,7 @@ class Layout:
                 max(area_top, top) - top : max(min(area_bottom, bottom) - top, 0),
                 max(area_left, left) - left : max(min(area_right, right) - left, 0),
             ] = False
-        return np.where(shown, view, 0).astype(np.uint8), shown
+        return box, shown
 
     def _boxes(self, size: tuple[int, int]) -> tuple[Orientation, Box, tuple[Box, ...]]:
         """The orientation of a screen of ``size``, its crop box and its redactions."""

@@ -351,7 +351,7 @@ def _picked(
             "index": frame.index,
             "timestamp_ms": frame.timestamp_ms,
             # Of the image sent, as run records it (see frame_to_source).
-            "phash": frame.phash if layout.is_identity else str(imagehash.phash(view)),
+            "phash": str(imagehash.phash(view)),
             "sharpness": round(frame.sharpness, 2),
             "crop": crop.model_dump(mode="json"),
         }

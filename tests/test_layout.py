@@ -11,7 +11,7 @@ from PIL import Image, ImageOps
 from pydantic import BaseModel
 
 from framelift import Profile
-from framelift._internal.layout import Layout, NoCropError, orientation_of
+from framelift._internal.layout import Layout, NoCropError, cut, orientation_of
 from framelift._internal.sources import load_image
 from framelift.profile import Box
 
@@ -257,15 +257,17 @@ def test_a_box_narrower_than_the_snapping_tolerance_keeps_one_pixel(box: Box) ->
     assert view.getpixel((0, 100)) == BLACK
 
 
-def test_visible_crops_first_and_marks_the_redactions_inside_the_crop() -> None:
+def test_mask_and_cut_crop_first_and_mark_the_redactions_inside_the_crop() -> None:
     gray = np.full((10, 20), 200, dtype=np.uint8)
     layout = Layout(
         locate={"landscape": (0.5, 0.0, 1.0, 1.0)},
         redact={"landscape": ((0.0, 0.0, 0.75, 0.5), (0.0, 0.5, 0.25, 1.0))},
     )
 
-    view, shown = layout.visible(gray)
+    box, shown = layout.mask((20, 10))
+    view = cut(gray, box, shown)
 
+    assert box == (10, 0, 20, 10)
     assert view.shape == (10, 10)
     assert shown is not None
     assert not shown[:5, :5].any()  # the part of the first redaction inside the crop
@@ -274,9 +276,9 @@ def test_visible_crops_first_and_marks_the_redactions_inside_the_crop() -> None:
     assert (gray == 200).all()  # the screen itself is left as it was
 
 
-def test_visible_without_redactions_has_no_mask() -> None:
+def test_mask_without_redactions_has_no_mask() -> None:
     gray = np.zeros((10, 20), dtype=np.uint8)
-    view, shown = Layout(locate={"landscape": (0.5, 0.0, 1.0, 1.0)}, redact={}).visible(gray)
+    box, shown = Layout(locate={"landscape": (0.5, 0.0, 1.0, 1.0)}, redact={}).mask((20, 10))
 
-    assert view.shape == (10, 10)
+    assert cut(gray, box, shown).shape == (10, 10)
     assert shown is None

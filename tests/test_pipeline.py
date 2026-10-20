@@ -394,12 +394,12 @@ def test_anonymized_video_errors_do_not_quote_the_input_path(
     real_to_sample = video_module._to_sample
     samples: list[int] = []
 
-    def breaks_after_the_first_screen(frame: Any, time: float, layout: Any) -> Any:
+    def breaks_after_the_first_screen(frame: Any, time: float, views: Any) -> Any:
         samples.append(1)
         if len(samples) > 10:  # past the first still screen (1.5 s at 4 samples a second)
             # FFmpeg's message quotes the file name, as for a real truncated recording.
             raise av.error.FFmpegError(1094995529, "Invalid data", str(breaks_off))
-        return real_to_sample(frame, time, layout)
+        return real_to_sample(frame, time, views)
 
     monkeypatch.setattr(video_module, "_to_sample", breaks_after_the_first_screen)
     pipeline = Pipeline(shop_profile, model=FunctionModel(_fixed_answer), anonymize_paths=True)
