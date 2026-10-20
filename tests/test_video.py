@@ -105,7 +105,7 @@ def test_the_same_screen_after_scrolling_away_and_back_is_read_again(tmp_path: P
     picked = list(video.sample_video(path))
 
     assert len(picked) == 3
-    first, last = imagehash.hex_to_hash(picked[0].phash), imagehash.hex_to_hash(picked[2].phash)
+    first, last = imagehash.phash(picked[0].image), imagehash.phash(picked[2].image)
     assert first - last <= 6  # alike enough that a hash-based split would have merged them
 
 

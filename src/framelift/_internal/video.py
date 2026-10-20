@@ -83,7 +83,6 @@ class VideoFrame:
     timestamp_ms: int
     image: Image.Image
     """Upright, with the video's display rotation applied."""
-    phash: str
     sharpness: float
 
 
@@ -510,7 +509,6 @@ class _Segmenter:
             index=self._emitted,
             timestamp_ms=sample.timestamp_ms,
             image=image,
-            phash=str(imagehash.phash(image)),
             sharpness=sample.sharpness,
         )
         self._emitted += 1
@@ -659,8 +657,8 @@ def frame_to_source(
         data=data,
         media_type="image/png",
         sha256=hashlib.sha256(data).hexdigest(),
-        # The picked frame's hash describes the whole screen; the record is of what was sent.
-        phash=frame.phash if layout.is_identity else str(imagehash.phash(view)),
+        # Of what is sent, as for a still image.
+        phash=str(imagehash.phash(view)),
         source_sha256=source_sha256,
         crop=crop,
         view=view,
