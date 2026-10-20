@@ -7,9 +7,11 @@ All notable changes to this project are documented here. This project follows
 
 ### Changed
 
-- Reading a video holds at most two decoded frames, the current still screen's best and the
-  fallback for a video that never stands still; the samples it compares with keep only their
-  small copies. The frames picked do not change
+- Reading a video no longer keeps a decoded frame for each sample it compares with, which keep
+  only their small copies: besides the frames being decoded, it holds only the current still
+  screen's best and the fallback for a video that never stands still. With a layout, the crop and the redaction masks are worked
+  out when the screen size or rotation changes instead of for every sample. The frames picked
+  do not change
 
 ### Fixed
 

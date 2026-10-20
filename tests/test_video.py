@@ -18,7 +18,7 @@ import pytest
 from PIL import Image, ImageDraw
 
 from framelift._internal import synth, video
-from framelift._internal.layout import Layout
+from framelift._internal.layout import Layout, cut
 from framelift.profile import Orientation
 
 pytest.importorskip("av")
@@ -359,6 +359,30 @@ def test_a_change_of_resolution_alone_does_not_split_a_still_screen(
     assert _diff(first, video._Sample.of(page.resize(after), 0)) > threshold
 
 
+def test_a_change_of_resolution_alone_does_not_split_a_redacted_still_screen() -> None:
+    layout = Layout(locate="full", redact={"landscape": ((0.6, 0.0, 1.0, 1.0),)})
+    views = video._Views(layout)
+    screen, page = _view(seed=3).render(0), _view(seed=4).render(0)
+
+    def sample(image: Image.Image, size: tuple[int, int]) -> video._Measured:
+        gray = np.asarray(image.resize(size).convert("L"))
+        view = views.get(gray.shape, 0)
+        assert view.box is not None
+        part = np.ascontiguousarray(cut(gray, view.box, view.shown))
+        return video._Sample.of_view(part, 0, _render, view).measured
+
+    first = sample(screen, (1280, 720))
+    threshold = video.DEFAULT_MOTION_THRESHOLD
+
+    # Compared at the smaller size, the masks shrunk to it too.
+    assert video._difference(first, sample(screen, (854, 480))) <= threshold
+    assert video._difference(first, sample(page, (854, 480))) > threshold
+    # Back at the first size, the view is made again: the masks are equal but not shared.
+    again = sample(screen, (1280, 720))
+    assert again.shown is not first.shown
+    assert video._difference(first, again) == 0.0
+
+
 def _with_shown(
     gray: np.ndarray, left: float, right: float, orientation: Orientation
 ) -> video._Sample:
@@ -566,6 +590,60 @@ def test_a_video_still_only_where_the_layout_cannot_crop_also_sends_one_it_can()
 
     picked = _run(segmenter, whole + moving)
     assert len(picked) == 2 and picked[0] < 2000 <= picked[1]
+
+
+def test_a_video_works_out_its_masks_once_per_screen_size(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "still.mp4"
+    view = _view()
+    synth.write_video(path, [view.render(0)] * 15 + [view.render(252)] * 15, fps=FPS)
+    layout = Layout(locate="full", redact={"landscape": ((0.0, 0.0, 0.4, 1.0),)})
+    calls: list[tuple[int, int]] = []
+    mask = Layout.mask
+
+    def counted(self: Layout, size: tuple[int, int]) -> Any:
+        calls.append(size)
+        return mask(self, size)
+
+    monkeypatch.setattr(Layout, "mask", counted)
+
+    assert len(list(video.sample_video(path, layout=layout))) == 2
+    assert len(calls) == 1
+
+
+def test_a_view_is_kept_until_the_screen_size_or_rotation_changes() -> None:
+    layout = Layout(
+        locate={"landscape": (0.0, 0.0, 1.0, 0.5), "portrait": (0.0, 0.0, 1.0, 0.5)},
+        redact={"landscape": ((0.0, 0.0, 0.5, 0.1),), "portrait": ()},
+    )
+    views = video._Views(layout)
+
+    first = views.get((720, 1280), 0)
+    assert views.get((720, 1280), 0) is first
+    smaller = views.get((480, 854), 0)
+    turned = views.get((720, 1280), 90)
+
+    assert smaller is not first and turned is not first
+    assert views.get((720, 1280), 90) is turned
+    assert views.get((720, 1280), 0) is not first  # only the last is kept
+    assert (first.orientation, first.box, first.turns) == ("landscape", (0, 0, 1280, 360), 0)
+    assert (turned.orientation, turned.box, turned.turns) == ("portrait", (0, 0, 720, 640), 1)
+    assert turned.shown is None
+    # Every sample of a view shares its mask, which a comparison then need not combine.
+    gray = np.zeros((360, 1280), dtype=np.uint8)
+    a, b = (video._Sample.of_view(gray, t, _render, first) for t in (0, 1))
+    assert a.measured.shown is b.measured.shown is first.small_shown
+
+
+def test_a_sample_keeps_its_last_shrunk_copy() -> None:
+    measured = video._Sample.of_gray(np.zeros((720, 1280), dtype=np.uint8), 0, _render).measured
+
+    assert measured.at(measured.small.shape)[0] is measured.small
+    smaller = measured.at((192, 336))
+    assert measured.at((192, 336)) is smaller
+    assert measured.at((96, 176))[0].shape == (96, 176)
+    assert measured.at((192, 336)) is not smaller  # only the last shape asked is kept
 
 
 class _Frame:
