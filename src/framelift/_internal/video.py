@@ -186,21 +186,31 @@ def _tiles(values: NDArray[np.float32]) -> NDArray[np.float32]:
     return values.reshape(_TILES, height // _TILES, _TILES, width // _TILES).sum(axis=(1, 3))
 
 
+def _same_view(a: _Sample, b: _Sample) -> bool:
+    """Whether two samples measured the same view: both cropped by the layout or both whole
+    screens, both with redactions or both without. Samples that did not show different screens,
+    whatever the motion threshold."""
+    return a.sendable == b.sendable and (a.shown is None) == (b.shown is None)
+
+
 def _difference(a: _Sample, b: _Sample) -> float:
     """The share of tiles (0-1) that changed between two samples, among the tiles mostly not
-    redacted; 1 for samples of different sizes, as after the screen turned."""
-    if a.small.shape != b.small.shape:
+    redacted; 1 for samples of different sizes, as after the screen turned, and for a sample
+    cropped and one measured on the whole screen, which show different things."""
+    if a.small.shape != b.small.shape or not _same_view(a, b):
         return 1.0
-    if a.shown is None:
+    if a.shown is None or b.shown is None:
         height, width = a.small.shape
         means = _tiles(np.abs(a.small - b.small)) / (height * width / _TILES**2)
         return float((means > _TILE_CHANGE).mean())
-    # The redacted parts are black in both, and must not dilute a tile's change.
-    weight = _tiles(a.shown)
-    counted = weight >= _TILE_SHOWN * a.shown.size / _TILES**2
+    # The redacted parts are black in both, and must not dilute a tile's change. Samples of one
+    # size share their redactions; the smaller mask keeps the comparison the same both ways.
+    shown = np.minimum(a.shown, b.shown)
+    weight = _tiles(shown)
+    counted = weight >= _TILE_SHOWN * shown.size / _TILES**2
     if not counted.any():
         return 0.0
-    means = _tiles(np.abs(a.small - b.small) * a.shown) / np.maximum(weight, 1e-9)
+    means = _tiles(np.abs(a.small - b.small) * shown) / np.maximum(weight, 1e-9)
     return float((means > _TILE_CHANGE)[counted].mean())
 
 
@@ -234,6 +244,9 @@ class _Sample:
     sharpness: float
     render: Callable[[], Image.Image]
     """Builds the full, upright color image; called only for a sample that is picked."""
+    sendable: bool = True
+    """False when the layout had no crop for the screen, so the whole screen was measured and
+    `frame_to_source` cannot send the sample."""
 
     @classmethod
     def of_gray(
@@ -242,6 +255,8 @@ class _Sample:
         time: float,
         render: Callable[[], Image.Image],
         shown: NDArray[np.bool_] | None = None,
+        *,
+        sendable: bool = True,
     ) -> _Sample:
         # One grayscale array serves both the movement check and the sharpness.
         height, width = gray.shape
@@ -253,7 +268,7 @@ class _Sample:
             mask = Image.fromarray(shown.astype(np.float32))
             small_shown = np.asarray(mask.resize(size, Image.Resampling.BILINEAR))
         sharp = _laplacian_variance(gray.astype(np.float32), shown)
-        return cls(round(time * 1000), small, small_shown, sharp, render)
+        return cls(round(time * 1000), small, small_shown, sharp, render, sendable)
 
     @classmethod
     def of(cls, image: Image.Image, time: float) -> _Sample:
@@ -264,8 +279,8 @@ class _Segmenter:
     """Splits samples into still segments and yields each segment's sharpest sample.
 
     Keeps a constant amount of state, so long videos do not grow memory: the current segment's
-    best sample, the small copies of its first and of the previous sample, and (until the first
-    segment is kept) the sharpest sample so far as a fallback.
+    best sample, the small copies of its first and of the previous sample, and (until a segment
+    the layout can crop is kept) the sharpest sample so far as a fallback.
     """
 
     def __init__(self, motion_threshold: float, min_still_samples: int) -> None:
@@ -277,14 +292,17 @@ class _Segmenter:
         self._count = 0
         self._fallback: _Sample | None = None
         self._emitted = 0
+        self._sent = False  # whether a sample the layout can crop was yielded
 
     def add(self, sample: _Sample, repeats: int = 1) -> Iterator[VideoFrame]:
         """Add a sample that was on screen at ``repeats`` sampling instants in a row."""
         if self._previous is not None and self._first is not None:
             # Comparing with the segment's first sample too catches slow scrolling, which moves
             # little between samples but replaces the whole screen over time.
+            # Another view splits even at a threshold of 1, which a share of 1 does not exceed.
             moved = (
-                _difference(sample, self._previous) > self._threshold
+                not _same_view(sample, self._previous)
+                or _difference(sample, self._previous) > self._threshold
                 or _difference(sample, self._first) > self._threshold
             )
             if moved:
@@ -295,16 +313,21 @@ class _Segmenter:
         self._previous = sample
         if self._best is None or sample.sharpness > self._best.sharpness:
             self._best = sample
-        if self._emitted == 0 and (
-            self._fallback is None or sample.sharpness > self._fallback.sharpness
+        # The fallback is sent, so a sample the layout can crop beats a sharper one it cannot.
+        if not self._sent and (
+            self._fallback is None
+            or (sample.sendable, sample.sharpness)
+            > (self._fallback.sendable, self._fallback.sharpness)
         ):
             self._fallback = sample
 
     def finish(self) -> Iterator[VideoFrame]:
         yield from self._close()
-        # A video that never stood still still gets read once, from its sharpest sample.
-        if self._emitted == 0 and self._fallback is not None:
-            yield self._emit(self._fallback)
+        # A video that never stood still still gets read once, from its sharpest sample; so does
+        # one that stood still only where the layout cannot crop, from a sample it can.
+        fallback = self._fallback
+        if not self._sent and fallback is not None and (self._emitted == 0 or fallback.sendable):
+            yield self._emit(fallback)
 
     def _close(self) -> Iterator[VideoFrame]:
         best, count = self._best, self._count
@@ -322,7 +345,9 @@ class _Segmenter:
             sharpness=sample.sharpness,
         )
         self._emitted += 1
-        self._fallback = None
+        if sample.sendable:
+            self._sent = True
+            self._fallback = None
         return frame
 
 
@@ -440,8 +465,8 @@ def _to_sample(frame: Any, time: float, layout: Layout | None) -> _Sample:
         return upright(frame.to_image(), frame.rotation)
 
     if layout is not None and not layout.is_identity:
-        visible, shown = _visible(gray, frame.rotation, layout)
-        return _Sample.of_gray(visible, time, render, shown)
+        visible, shown, sendable = _visible(gray, frame.rotation, layout)
+        return _Sample.of_gray(visible, time, render, shown, sendable=sendable)
     # Without a layout the plane is not even turned upright: every sample of a stream has the
     # same rotation, and the Laplacian's variance does not change under a quarter turn.
     return _Sample.of_gray(gray, time, render)
@@ -449,17 +474,17 @@ def _to_sample(frame: Any, time: float, layout: Layout | None) -> _Sample:
 
 def _visible(
     gray: NDArray[np.uint8], rotation: float, layout: Layout
-) -> tuple[NDArray[np.uint8], NDArray[np.bool_] | None]:
+) -> tuple[NDArray[np.uint8], NDArray[np.bool_] | None, bool]:
     """The part of a luma plane that ``layout`` sends, turned upright first, as its boxes are,
-    and which of its pixels are not redacted."""
+    which of its pixels are not redacted, and whether ``layout`` had a crop for it."""
     # Counterclockwise quarter turns, as upright turns the color image.
     gray = np.rot90(gray, k=_quarter_turns(rotation))
     try:
         visible, shown = layout.visible(gray)
     except NoCropError:
         # The whole screen, then; frame_to_source reports the picked frame as uncropped.
-        return np.ascontiguousarray(gray), None
-    return np.ascontiguousarray(visible), shown
+        return np.ascontiguousarray(gray), None, False
+    return np.ascontiguousarray(visible), shown, True
 
 
 def frame_to_source(

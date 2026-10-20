@@ -5,6 +5,14 @@ All notable changes to this project are documented here. This project follows
 
 ## [Unreleased]
 
+### Fixed
+
+- In a video whose screens the layout can crop only some of the time (the resolution or the
+  orientation changes midway), a cropped sample and one measured on the whole screen are no
+  longer compared as the same screen, even at `--motion-threshold 1`, and a video that never
+  stands still where the layout can crop falls back to the sharpest sample it can crop rather
+  than to a sharper one it cannot, which was reported as an error
+
 ## [0.7.0] - 2026-10-19
 
 ### Changed

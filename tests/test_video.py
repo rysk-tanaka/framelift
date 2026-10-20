@@ -370,6 +370,78 @@ def test_the_edges_of_a_redaction_do_not_count_as_sharpness() -> None:
     assert video._Sample.of_gray(gray, 0, _render, shown).sharpness == 0
 
 
+def test_a_cropped_sample_and_a_whole_screen_are_different_screens() -> None:
+    gray = np.full((256, 256), 128, dtype=np.uint8)
+    cropped = video._Sample.of_gray(gray, 0, _render)
+    whole = video._Sample.of_gray(gray, 0, _render, sendable=False)
+
+    assert video._difference(cropped, whole) == 1.0
+    assert video._difference(whole, cropped) == 1.0
+
+
+def test_a_redacted_sample_and_one_without_redactions_are_different_screens() -> None:
+    gray = np.full((256, 256), 128, dtype=np.uint8)
+    shown = np.ones(gray.shape, dtype=np.bool_)
+    shown[:, :128] = False
+    redacted = video._Sample.of_gray(np.where(shown, gray, 0).astype(np.uint8), 0, _render, shown)
+    plain = video._Sample.of_gray(gray, 0, _render)
+
+    assert video._difference(redacted, plain) == 1.0
+    assert video._difference(plain, redacted) == 1.0
+
+
+def test_a_video_that_never_stands_still_falls_back_to_a_sample_it_can_crop() -> None:
+    rng = np.random.default_rng(0)
+    segmenter = video._Segmenter(video.DEFAULT_MOTION_THRESHOLD, video.MIN_STILL_SAMPLES)
+    # Noise is far sharper than the smooth gradient, but the layout has no crop for it.
+    smooth = np.tile(np.linspace(0, 255, 256, dtype=np.uint8), (256, 1))
+    samples = [
+        video._Sample.of_gray(
+            rng.integers(0, 256, (256, 256), dtype=np.uint8), 0, _render, sendable=False
+        ),
+        video._Sample.of_gray(smooth, 1, _render),
+        video._Sample.of_gray(
+            rng.integers(0, 256, (256, 256), dtype=np.uint8), 2, _render, sendable=False
+        ),
+    ]
+    frames = [frame for sample in samples for frame in segmenter.add(sample)]
+    frames += segmenter.finish()
+
+    assert [frame.timestamp_ms for frame in frames] == [1000]
+
+
+def _run(segmenter: video._Segmenter, samples: list[video._Sample]) -> list[int]:
+    frames = [frame for sample in samples for frame in segmenter.add(sample)]
+    frames += segmenter.finish()
+    return [frame.timestamp_ms for frame in frames]
+
+
+def test_a_view_the_layout_cannot_crop_splits_even_at_a_threshold_of_1() -> None:
+    smooth = np.tile(np.linspace(0, 255, 256, dtype=np.uint8), (256, 1))
+    noise = np.random.default_rng(0).integers(0, 256, (256, 256), dtype=np.uint8)
+    cropped = [video._Sample.of_gray(smooth, t, _render) for t in (0, 1)]
+    whole = [video._Sample.of_gray(noise, t, _render, sendable=False) for t in (2, 3)]
+    segmenter = video._Segmenter(1.0, video.MIN_STILL_SAMPLES)
+
+    # One segment would have sent only the sharper sample, which cannot be cropped.
+    assert _run(segmenter, cropped + whole) == [0, 2000]
+
+
+def test_a_video_still_only_where_the_layout_cannot_crop_also_sends_one_it_can() -> None:
+    rng = np.random.default_rng(0)
+    still = rng.integers(0, 256, (256, 256), dtype=np.uint8)
+    whole = [video._Sample.of_gray(still, t, _render, sendable=False) for t in (0, 1)]
+    # Then only scrolling where the layout can crop: no still segment of its own.
+    moving = [
+        video._Sample.of_gray(rng.integers(0, 256, (256, 256), dtype=np.uint8), t, _render)
+        for t in (2, 3, 4)
+    ]
+    segmenter = video._Segmenter(video.DEFAULT_MOTION_THRESHOLD, video.MIN_STILL_SAMPLES)
+
+    picked = _run(segmenter, whole + moving)
+    assert len(picked) == 2 and picked[0] < 2000 <= picked[1]
+
+
 @pytest.mark.parametrize(
     ("frame_rate", "motion_threshold"),
     [(0, 0.05), (float("nan"), 0.05), (float("inf"), 0.05), (4, -0.1), (4, 1.5), (4, float("nan"))],
