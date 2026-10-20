@@ -5,6 +5,8 @@ All notable changes to this project are documented here. This project follows
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-10-20
+
 ### Changed
 
 - Reading a video no longer keeps a decoded frame for each sample it compares with, which keep
@@ -186,7 +188,8 @@ All notable changes to this project are documented here. This project follows
 - `framelift run` and `framelift synth` CLI commands
 - Synthetic fictional-shop sample generator
 
-[Unreleased]: https://github.com/rysk-tanaka/framelift/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/rysk-tanaka/framelift/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/rysk-tanaka/framelift/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/rysk-tanaka/framelift/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/rysk-tanaka/framelift/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/rysk-tanaka/framelift/compare/v0.4.0...v0.5.0
