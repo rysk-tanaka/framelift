@@ -88,3 +88,13 @@ addopts = ["-ra", "--strict-markers", "-m", "not live"]
 markers = [
     "live: calls the real model named by FRAMELIFT_LIVE_MODEL, skipped without it (needs the provider's API key; not run in CI)",
 ]
+filterwarnings = [
+    # Deprecations framelift's own calls cause fail the tests, so they are fixed before the
+    # release that removes them. Only framelift's: one a library raises inside itself (Pydantic AI
+    # on Python 3.12, a provider SDK in the live tests) is not framelift's to fix. A warning is
+    # framelift's when the library's stacklevel points into framelift, so a library that points
+    # at itself goes unnoticed. FutureWarning is how numpy and others deprecate for end users.
+    "error::DeprecationWarning:framelift",
+    "error::PendingDeprecationWarning:framelift",
+    "error::FutureWarning:framelift",
+]
