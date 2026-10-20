@@ -14,8 +14,8 @@ that movement elsewhere (a character's idle animation beside the list being read
 a still screen. Each tile counts toward the share that changed by how much of it is not
 redacted, so a wide redaction does not hide the change in the rest, nor a narrow strip left
 unredacted its own; the sharpness leaves out the edges of redactions. A
-small crop is shrunk less, never enlarged, so that a tile keeps the pixels the threshold was
-measured with.
+small crop is shrunk less than a whole screen, but always a few times, so that codec noise is
+averaged away before the threshold sees it.
 
 Each sample is the frame on screen at a sampling instant, so a variable-frame-rate recording that
 encodes a still screen as one long frame counts as one sample per instant it was shown.
@@ -56,6 +56,11 @@ MIN_STILL_SAMPLES = 2
 _DIFF_SIZE = 256
 _TILES = 16
 _TILE_CHANGE = 3.0
+# A sample is shrunk at least this many times a side, so that codec noise, which the threshold
+# would take for change pixel by pixel, is averaged away as it is on a whole screen. Not more:
+# the few pixels a slow scroll moves between samples stay visible when shrunk up to about as
+# many times as a whole 720p screen is (2.8 down to 256 rows), and vanish beyond.
+_MIN_SHRINK = 2.5
 # Sampling instants are computed in floating point; without a tolerance, 0.1 + 0.1 + 0.1 lands
 # just after a frame at 0.3 s and the instant would be credited to the frame before it.
 _TIME_TOLERANCE = 1e-6
@@ -169,12 +174,12 @@ def ticks_before(next_time: float, time: float, step: float) -> int:
 
 
 def _diff_size(width: int, height: int) -> tuple[int, int]:
-    """The size a sample is shrunk to: at most _DIFF_SIZE a side, never enlarged, and a multiple
-    of _TILES, so that a small crop keeps the pixels per tile that _TILE_CHANGE was measured
-    with instead of being stretched."""
+    """The size a sample is shrunk to: at most _DIFF_SIZE a side, shrunk at least _MIN_SHRINK
+    times, and a multiple of _TILES. A side that would be under _TILES is _TILES, the only case
+    where a sample is enlarged, so that it still has _TILES x _TILES tiles."""
 
     def side(length: int) -> int:
-        return max(_TILES, min(_DIFF_SIZE, length // _TILES * _TILES))
+        return max(_TILES, min(_DIFF_SIZE, int(length / _MIN_SHRINK) // _TILES * _TILES))
 
     return side(width), side(height)
 

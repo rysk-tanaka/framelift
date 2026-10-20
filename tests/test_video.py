@@ -386,12 +386,41 @@ def _render() -> Image.Image:
     return Image.new("L", (1, 1))
 
 
-def test_a_small_crop_is_not_enlarged_for_the_movement_check() -> None:
+def test_a_sample_is_shrunk_a_few_times_and_to_at_most_256_a_side() -> None:
     band = video._Sample.of_gray(np.zeros((72, 1280), dtype=np.uint8), 0, _render)
-    screen = video._Sample.of_gray(np.zeros((720, 1280), dtype=np.uint8), 0, _render)
+    screen = video._Sample.of_gray(np.zeros((1080, 1920), dtype=np.uint8), 0, _render)
+    thin = video._Sample.of_gray(np.zeros((8, 400), dtype=np.uint8), 0, _render)
 
-    assert band.small.shape == (64, 256)
+    assert band.small.shape == (16, 256)
     assert screen.small.shape == (256, 256)
+    # Under 16 a side, the only case enlarged, so that there are still 16 x 16 tiles.
+    assert thin.small.shape == (16, 160)
+
+
+def _write_compressed(path: Path, frames: list[Image.Image], *, crf: int, keyframes: int) -> None:
+    """Encode ``frames`` as H.264 at quality ``crf``, with a keyframe every ``keyframes`` frames:
+    each keyframe encodes the still screen anew, which flickers more the harder it compresses."""
+    import av
+
+    with av.open(str(path), mode="w") as container:
+        options = {"crf": str(crf), "g": str(keyframes)}
+        stream = container.add_stream("libx264", rate=FPS, options=options)
+        stream.pix_fmt = "yuv420p"
+        stream.width, stream.height = frames[0].size
+        for image in frames:
+            container.mux(stream.encode(av.VideoFrame.from_image(image)))
+        container.mux(stream.encode())
+
+
+def test_codec_noise_does_not_split_a_still_screen_in_a_small_crop(tmp_path: Path) -> None:
+    view = _view()
+    path = tmp_path / "compressed.mp4"
+    # Compressed as a recorder might, with a keyframe every 0.5 s; then scrolled by two rows.
+    _write_compressed(path, [view.render(0)] * 20 + [view.render(168)] * 20, crf=28, keyframes=5)
+    small = Layout(locate={"landscape": (100 / 1280, 200 / 720, 260 / 1280, 300 / 720)}, redact={})
+
+    picked = [frame.timestamp_ms for frame in video.sample_video(path, layout=small)]
+    assert len(picked) == 2 and picked[0] < 2000 <= picked[1]
 
 
 def test_a_crop_too_thin_for_the_laplacian_has_no_sharpness() -> None:

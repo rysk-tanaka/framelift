@@ -15,6 +15,10 @@ All notable changes to this project are documented here. This project follows
 - With a layout, a change in a narrow strip left unredacted, or in the row beside a redaction,
   splits a video's still screens again: each tile now counts toward the share that changed by how
   much of it is shown, instead of tiles under half shown not counting at all
+- Codec noise splits a still screen of a video cropped to a small part of the screen far less
+  often: every sample is shrunk at least 2.5 times a side before it is compared, as a whole screen
+  is, instead of a small crop being compared nearly pixel by pixel. A crop of about 160x100 from a
+  heavily compressed recording with frequent keyframes can still be split
 
 ## [0.7.0] - 2026-10-19
 
