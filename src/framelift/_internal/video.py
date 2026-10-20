@@ -34,7 +34,7 @@ import imagehash
 import numpy as np
 from PIL import Image
 
-from framelift._internal.layout import NoCropError, encode_png
+from framelift._internal.layout import NoCropError, encode_png, orientation_of
 from framelift._internal.sources import ImageSource, UnreadableInputError, error_reason
 
 if TYPE_CHECKING:
@@ -44,6 +44,7 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
     from framelift._internal.layout import Layout
+    from framelift.profile import Orientation
 
 DEFAULT_FRAME_RATE = 4.0
 DEFAULT_MOTION_THRESHOLD = 0.05
@@ -191,30 +192,50 @@ def _tiles(values: NDArray[np.float32]) -> NDArray[np.float32]:
 
 
 def _same_view(a: _Sample, b: _Sample) -> bool:
-    """Whether two samples measured the same view: both cropped by the layout or both whole
-    screens, both with redactions or both without. Samples that did not show different screens,
+    """Whether two samples measured the same view: screens of one orientation, both cropped by
+    the layout or both measured whole, both redacted or neither. The layout's crop and
+    redactions depend only on the orientation, so such samples measured the same part of the
+    screen, whatever its resolution. Samples that fail this always count as different screens,
     whatever the motion threshold."""
-    return a.sendable == b.sendable and (a.shown is None) == (b.shown is None)
+    return (
+        a.orientation == b.orientation
+        and a.sendable == b.sendable
+        and (a.shown is None) == (b.shown is None)
+    )
+
+
+def _resized(values: NDArray[np.float32], shape: tuple[int, int]) -> NDArray[np.float32]:
+    if values.shape == shape:
+        return values
+    height, width = shape
+    image = Image.fromarray(values).resize((width, height), Image.Resampling.BILINEAR)
+    return np.asarray(image, dtype=np.float32)
 
 
 def _difference(a: _Sample, b: _Sample) -> float:
     """The share of tiles (0-1) that changed between two samples, each tile counted by how much
-    of it is not redacted; 1 for samples of different sizes, as after the screen turned, and for
-    a sample cropped and one measured on the whole screen, which show different things."""
-    if a.small.shape != b.small.shape or not _same_view(a, b):
+    of it is not redacted; 1 for samples that did not measure the same view (see `_same_view`).
+
+    Samples of different sizes, as after the resolution changed, are compared at the smaller
+    size: each covers the whole of what it measured, so shrinking both to one size lines them
+    up, as every sample was shrunk to 256x256 before 0.5.
+    """
+    if not _same_view(a, b):
         return 1.0
+    shape = (min(a.small.shape[0], b.small.shape[0]), min(a.small.shape[1], b.small.shape[1]))
+    small_a, small_b = _resized(a.small, shape), _resized(b.small, shape)
     if a.shown is None or b.shown is None:
-        height, width = a.small.shape
-        means = _tiles(np.abs(a.small - b.small)) / (height * width / _TILES**2)
+        height, width = shape
+        means = _tiles(np.abs(small_a - small_b)) / (height * width / _TILES**2)
         return float((means > _TILE_CHANGE).mean())
     # The redacted parts are black in both, and must not dilute a tile's change. Samples of one
     # size share their redactions; the smaller mask keeps the comparison the same both ways.
-    shown = np.minimum(a.shown, b.shown)
+    shown = np.minimum(_resized(a.shown, shape), _resized(b.shown, shape))
     weight = _tiles(shown)
     total = weight.sum()
     if total <= 0:
         return 0.0  # all redacted: nothing to compare
-    means = _tiles(np.abs(a.small - b.small) * shown) / np.maximum(weight, 1e-9)
+    means = _tiles(np.abs(small_a - small_b) * shown) / np.maximum(weight, 1e-9)
     # Each tile counts by how much of it is shown, so a thin strip left unredacted, or a row
     # beside a redaction, still counts; a tile barely shown, whose mean is noisy, barely does.
     return float(weight[means > _TILE_CHANGE].sum() / total)
@@ -250,9 +271,14 @@ class _Sample:
     sharpness: float
     render: Callable[[], Image.Image]
     """Builds the full, upright color image; called only for a sample that is picked."""
-    sendable: bool = True
+    sendable: bool
     """False when the layout had no crop for the screen, so the whole screen was measured and
     `frame_to_source` cannot send the sample."""
+    orientation: Orientation
+    """Of the whole screen, which decides the layout's crop and redactions: upright with a
+    layout; without one, as decoded, which is the same for every sample of a stream."""
+    pixels: int
+    """How many pixels were measured, before they were shrunk to ``small``."""
 
     @classmethod
     def of_gray(
@@ -263,9 +289,13 @@ class _Sample:
         shown: NDArray[np.bool_] | None = None,
         *,
         sendable: bool = True,
+        orientation: Orientation | None = None,
     ) -> _Sample:
+        """``orientation`` is the whole screen's; by default, ``gray``'s."""
         # One grayscale array serves both the movement check and the sharpness.
         height, width = gray.shape
+        if orientation is None:
+            orientation = orientation_of((width, height))
         size = _diff_size(width, height)
         small_image = Image.fromarray(gray).resize(size, Image.Resampling.BILINEAR)
         small = np.asarray(small_image, dtype=np.float32)
@@ -274,7 +304,16 @@ class _Sample:
             mask = Image.fromarray(shown.astype(np.float32))
             small_shown = np.asarray(mask.resize(size, Image.Resampling.BILINEAR))
         sharp = _laplacian_variance(gray.astype(np.float32), shown)
-        return cls(round(time * 1000), small, small_shown, sharp, render, sendable)
+        return cls(
+            round(time * 1000),
+            small,
+            small_shown,
+            sharp,
+            render,
+            sendable,
+            orientation,
+            height * width,
+        )
 
     @classmethod
     def of(cls, image: Image.Image, time: float) -> _Sample:
@@ -317,13 +356,18 @@ class _Segmenter:
             self._first = sample
         self._count += repeats
         self._previous = sample
-        if self._best is None or sample.sharpness > self._best.sharpness:
+        # More pixels first: after the resolution changed, a segment holds both, and a frame
+        # shrunk to fewer pixels has a higher variance of the Laplacian without being sharper.
+        if self._best is None or (sample.pixels, sample.sharpness) > (
+            self._best.pixels,
+            self._best.sharpness,
+        ):
             self._best = sample
         # The fallback is sent, so a sample the layout can crop beats a sharper one it cannot.
         if not self._sent and (
             self._fallback is None
-            or (sample.sendable, sample.sharpness)
-            > (self._fallback.sendable, self._fallback.sharpness)
+            or (sample.sendable, sample.pixels, sample.sharpness)
+            > (self._fallback.sendable, self._fallback.pixels, self._fallback.sharpness)
         ):
             self._fallback = sample
 
@@ -365,14 +409,16 @@ def sample_video(
     min_still_samples: int = MIN_STILL_SAMPLES,
     layout: Layout | None = None,
 ) -> Generator[VideoFrame, None, None]:
-    """Yield the sharpest frame of every still segment of a video, in order.
+    """Yield the sharpest frame of every still segment of a video, in order; a fallback (below)
+    comes last, and can be earlier than the frames before it.
 
     Frames are sampled ``frame_rate`` times per second. A sample joins the current segment when,
     compared with both the previous sample and the segment's first sample, at most
     ``motion_threshold`` of the screen (the share of 16x16 tiles, 0-1) changed. Segments
     with fewer than ``min_still_samples`` samples are movement and are dropped, so a screen shown
     for less than about ``min_still_samples / frame_rate`` seconds can be missed. A video with no
-    still segment yields its sharpest sample. With a ``layout``, both are measured on the part of
+    still segment yields its sharpest sample, as does one still only where ``layout`` has no
+    crop, from a sample it can crop. With a ``layout``, both are measured on the part of
     the screen it sends: each tile counts toward the share by how much of it is not redacted, and
     the sharpness only pixels clear of redactions. The frames yielded are still whole screens.
 
@@ -471,8 +517,10 @@ def _to_sample(frame: Any, time: float, layout: Layout | None) -> _Sample:
         return upright(frame.to_image(), frame.rotation)
 
     if layout is not None and not layout.is_identity:
-        visible, shown, sendable = _visible(gray, frame.rotation, layout)
-        return _Sample.of_gray(visible, time, render, shown, sendable=sendable)
+        visible, shown, sendable, orientation = _visible(gray, frame.rotation, layout)
+        return _Sample.of_gray(
+            visible, time, render, shown, sendable=sendable, orientation=orientation
+        )
     # Without a layout the plane is not even turned upright: every sample of a stream has the
     # same rotation, and the Laplacian's variance does not change under a quarter turn.
     return _Sample.of_gray(gray, time, render)
@@ -480,17 +528,20 @@ def _to_sample(frame: Any, time: float, layout: Layout | None) -> _Sample:
 
 def _visible(
     gray: NDArray[np.uint8], rotation: float, layout: Layout
-) -> tuple[NDArray[np.uint8], NDArray[np.bool_] | None, bool]:
+) -> tuple[NDArray[np.uint8], NDArray[np.bool_] | None, bool, Orientation]:
     """The part of a luma plane that ``layout`` sends, turned upright first, as its boxes are,
-    which of its pixels are not redacted, and whether ``layout`` had a crop for it."""
+    which of its pixels are not redacted, whether ``layout`` had a crop for it, and the upright
+    screen's orientation."""
     # Counterclockwise quarter turns, as upright turns the color image.
     gray = np.rot90(gray, k=_quarter_turns(rotation))
+    height, width = gray.shape
+    orientation = orientation_of((width, height))
     try:
         visible, shown = layout.visible(gray)
     except NoCropError:
         # The whole screen, then; frame_to_source reports the picked frame as uncropped.
-        return np.ascontiguousarray(gray), None, False
-    return np.ascontiguousarray(visible), shown, True
+        return np.ascontiguousarray(gray), None, False, orientation
+    return np.ascontiguousarray(visible), shown, True, orientation
 
 
 def frame_to_source(

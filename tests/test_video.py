@@ -17,6 +17,7 @@ from PIL import Image, ImageDraw
 
 from framelift._internal import synth, video
 from framelift._internal.layout import Layout
+from framelift.profile import Orientation
 
 pytest.importorskip("av")
 
@@ -338,6 +339,54 @@ def test_a_change_beside_a_wide_redaction_is_still_a_new_screen(tmp_path: Path) 
     )
 
     assert len(list(video.sample_video(path, layout=corner_only))) == 2
+
+
+@pytest.mark.parametrize(("before", "after"), [((320, 240), (256, 192)), ((1280, 720), (854, 480))])
+def test_a_change_of_resolution_alone_does_not_split_a_still_screen(
+    before: tuple[int, int], after: tuple[int, int]
+) -> None:
+    screen, page = _view(seed=3).render(0), _view(seed=4).render(0)
+    first = video._Sample.of(screen.resize(before), 0)
+    threshold = video.DEFAULT_MOTION_THRESHOLD
+
+    assert video._difference(first, video._Sample.of(screen.resize(after), 0)) <= threshold
+    assert video._difference(first, video._Sample.of(page.resize(after), 0)) > threshold
+
+
+def _with_shown(
+    gray: np.ndarray, left: float, right: float, orientation: Orientation
+) -> video._Sample:
+    """A sample of ``gray`` with only its columns from ``left`` to ``right`` (fractions) shown,
+    cropped from a screen of ``orientation``."""
+    shown = np.zeros(gray.shape, dtype=np.bool_)
+    width = gray.shape[1]
+    shown[:, round(left * width) : round(right * width)] = True
+    masked = np.where(shown, gray, 0).astype(np.uint8)
+    return video._Sample.of_gray(masked, 0, _render, shown, orientation=orientation)
+
+
+def test_a_turned_screen_is_a_different_screen() -> None:
+    screen = np.asarray(_view().render(0).convert("L"))
+    landscape = video._Sample.of_gray(np.ascontiguousarray(screen[:480, :640]), 0, _render)
+    portrait = video._Sample.of_gray(np.ascontiguousarray(screen[:640, :480]), 0, _render)
+    assert video._difference(landscape, portrait) == 1.0
+    # Crops of one shape from screens of either orientation, whose redactions share nothing:
+    # what decides is the screen's orientation, not the crop's.
+    crop = np.ascontiguousarray(screen[:480, :320])
+    left = _with_shown(crop, 0.0, 0.25, "landscape")
+    right = _with_shown(crop, 0.75, 1.0, "portrait")
+    assert video._difference(left, right) == 1.0
+
+
+def test_after_the_resolution_changes_the_frame_with_more_pixels_is_sent() -> None:
+    screen = _view().render(0)
+    big = video._Sample.of(screen, 0)
+    small = video._Sample.of(screen.resize((854, 480)), 1)
+    segmenter = video._Segmenter(video.DEFAULT_MOTION_THRESHOLD, video.MIN_STILL_SAMPLES)
+
+    # Shrunk, the screen has the higher variance of the Laplacian, but less to read.
+    assert small.sharpness > big.sharpness
+    assert _run(segmenter, [big, small]) == [0]
 
 
 def _column_pages() -> list[Image.Image]:

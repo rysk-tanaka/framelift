@@ -19,6 +19,10 @@ All notable changes to this project are documented here. This project follows
   often: every sample is shrunk at least 2.5 times a side before it is compared, as a whole screen
   is, instead of a small crop being compared nearly pixel by pixel. A crop of about 160x100 from a
   heavily compressed recording with frequent keyframes can still be split
+- A change of resolution midway through a video no longer splits a still screen by itself:
+  samples of different sizes from screens of one orientation are compared at the smaller size
+  instead of always counting as different screens, as they did since 0.5 even without a layout,
+  and the frame with more pixels is sent. A screen that turns is still a new screen
 
 ## [0.7.0] - 2026-10-19
 
