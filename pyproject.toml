@@ -24,17 +24,17 @@ dependencies = [
     "numpy>=2",
     "pillow>=12",
     "pydantic>=2.14",
-    "pydantic-ai-slim>=2.57",
+    "pydantic-ai-slim>=2.60",
     "pyyaml>=6",
     "typer>=0.27",
 ]
 
 [project.optional-dependencies]
 video = ["av>=19"]
-eval = ["pydantic-evals>=2.57"]
-anthropic = ["pydantic-ai-slim[anthropic]>=2.57"]
-openai = ["pydantic-ai-slim[openai]>=2.57"]
-google = ["pydantic-ai-slim[google]>=2.57"]
+eval = ["pydantic-evals>=2.60"]
+anthropic = ["pydantic-ai-slim[anthropic]>=2.60"]
+openai = ["pydantic-ai-slim[openai]>=2.60"]
+google = ["pydantic-ai-slim[google]>=2.60"]
 
 [project.scripts]
 framelift = "framelift.cli:app"

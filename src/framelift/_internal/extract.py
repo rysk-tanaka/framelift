@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel
 from pydantic_ai import Agent, AgentRetries, BinaryContent, capture_run_messages
 from pydantic_ai.exceptions import UnexpectedModelBehavior, UserError
-from pydantic_ai.messages import RetryPromptPart
+from pydantic_ai.messages import RetryFeedbackPart, ToolReturnPart
 from pydantic_ai.models import infer_model
 from pydantic_ai.models.wrapper import WrapperModel
 from pydantic_ai.usage import RunUsage
@@ -197,6 +197,13 @@ def _prompt(image: ImageSource) -> list[str | BinaryContent]:
     return [USER_PROMPT, BinaryContent(data=image.data, media_type=image.media_type)]
 
 
+def _is_retry(part: object) -> bool:
+    """Whether ``part`` asked the model to try again: a retried output tool call, as structured
+    output answers, or feedback on a response that answered no call."""
+    is_retried_call = isinstance(part, ToolReturnPart) and part.outcome == "retried"
+    return is_retried_call or isinstance(part, RetryFeedbackPart)
+
+
 def _extraction[OutputT: BaseModel](
     output: OutputT | None,
     error: str | None,
@@ -204,9 +211,7 @@ def _extraction[OutputT: BaseModel](
     messages: list[ModelMessage],
     started: float,
 ) -> Extraction[OutputT]:
-    retries = sum(
-        isinstance(part, RetryPromptPart) for message in messages for part in message.parts
-    )
+    retries = sum(_is_retry(part) for message in messages for part in message.parts)
     return Extraction(
         output=output,
         error=error,
