@@ -43,12 +43,11 @@ jobs:
     needs: validate-branch
     permissions:
       contents: write
-    uses: rysk-tanaka/workflows/.github/workflows/release-on-version-change.yml@d7782d948c15ff4a2d2e452b86e8265c1eb98a94 # main
+    uses: rysk-tanaka/workflows/.github/workflows/release-on-version-change.yml@b710d50e8e89e3f80986e25431680ed072819a2b # main
     with:
       version_source: pyproject
       tag_prefix: v
       force_released_output: ${{ github.event_name == 'workflow_dispatch' }}
-    secrets: inherit
 
   build:
     needs: create-release
@@ -82,7 +81,7 @@ jobs:
         with:
           name: dist
           path: dist/
-      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           # a workflow_dispatch rerun may find this version already on PyPI
           skip-existing: true
