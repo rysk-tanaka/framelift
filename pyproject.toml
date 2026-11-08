@@ -48,6 +48,11 @@ Changelog = "https://github.com/rysk-tanaka/framelift/blob/main/CHANGELOG.md"
 requires = ["uv_build>=0.13.0,<0.14.0"]
 build-backend = "uv_build"
 
+[tool.uv]
+# Renovate's minimumReleaseAge does not cover lock file maintenance, so uv itself
+# must refuse versions published less than 3 days ago, transitive ones included.
+exclude-newer = "3 days"
+
 [dependency-groups]
 dev = [
     "pytest>=9.1",
