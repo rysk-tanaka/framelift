@@ -57,7 +57,7 @@ exclude-newer = "3 days"
 dev = [
     "pytest>=9.1",
     "ruff==0.17.4",
-    "ty==0.0.96",
+    "ty==0.0.100",
 ]
 
 [tool.ruff]
