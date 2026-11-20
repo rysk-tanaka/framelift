@@ -43,7 +43,7 @@ jobs:
     needs: validate-branch
     permissions:
       contents: write
-    uses: rysk-tanaka/workflows/.github/workflows/release-on-version-change.yml@d5a542fb1ec5e23efa47ccf1a4f8dbbe8a92d71a # main
+    uses: rysk-tanaka/workflows/.github/workflows/release-on-version-change.yml@02f082fbc0a61d0a121b3ce79ecfbcfd1bc579c7 # main
     with:
       version_source: pyproject
       tag_prefix: v
